@@ -453,7 +453,9 @@ namespace XAU.ViewModels.Pages
                         client.DefaultRequestHeaders.Add("Authorization", XAUTH);
                         client.DefaultRequestHeaders.Add("accept-language", currentSystemLanguage);
                         var gpu = (dynamic)JObject.Parse(await client.GetAsync("https://xgrant.xboxlive.com/users/xuid(" + XUIDOnly + ")/programInfo?filter=profile,activities,catalog").Result.Content.ReadAsStringAsync());
-                        Gamepass = $"Gamepass: {gpu.gamePassMembership}";
+                        Gamepass = string.IsNullOrEmpty(gpu.gamePassMembership)
+                            ? $"Gamepass: {gpu.data.gamePassMembership}"
+                            : $"Gamepass: {gpu.gamePassMembership}";
                     }
                     catch
                     {
