@@ -42,6 +42,11 @@
 
   <ItemGroup>
     <Folder Include="Util\XboxAuthNet\Platforms\" />
+    <Content Include="Models\rps_soap_request_envelope.xml">
+        <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+      </Content>
+    
   </ItemGroup>
+
 
 </Project>
