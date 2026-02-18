@@ -24,6 +24,7 @@ namespace XAU.Views.Pages
             {
                 XauthTextBox.Text = HomeViewModel.XAUTH;
                 EventsTokenBox.Text = AchievementsViewModel.EventsToken;
+                UpdateEventsTokenStatus();
             };
 
             InitializeComponent();
@@ -61,6 +62,7 @@ namespace XAU.Views.Pages
             }
 
             AchievementsViewModel.EventsToken = EventsTokenBox.Text;
+            UpdateEventsTokenStatus();
         }
 
         private void XAuthBox_OnSizeChanged(object sender, SizeChangedEventArgs e)
@@ -101,6 +103,7 @@ namespace XAU.Views.Pages
                         Dispatcher.Invoke(() =>
                         {
                             EventsTokenBox.Text = AchievementsViewModel.EventsToken;
+                            UpdateEventsTokenStatus();
                             _snackbarService.Show(
                                 "Events Token Found",
                                 "Successfully extracted events token from a running game.",
@@ -122,6 +125,25 @@ namespace XAU.Views.Pages
                     );
                 });
             });
+        }
+
+        private void UpdateEventsTokenStatus()
+        {
+            if (HomeViewModel.IsEventsTokenValid())
+            {
+                EventsTokenStatus.Text = "Valid Token";
+                EventsTokenStatus.Foreground = new System.Windows.Media.SolidColorBrush(System.Windows.Media.Colors.Green);
+            }
+            else if (!string.IsNullOrEmpty(AchievementsViewModel.EventsToken))
+            {
+                EventsTokenStatus.Text = "Invalid Format";
+                EventsTokenStatus.Foreground = new System.Windows.Media.SolidColorBrush(System.Windows.Media.Colors.Orange);
+            }
+            else
+            {
+                EventsTokenStatus.Text = "No Token";
+                EventsTokenStatus.Foreground = new System.Windows.Media.SolidColorBrush(System.Windows.Media.Colors.Red);
+            }
         }
 
         private void EventsBoxGrid_OnSizeChanged(object sender, SizeChangedEventArgs e)

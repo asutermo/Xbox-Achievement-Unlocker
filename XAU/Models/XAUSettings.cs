@@ -11,4 +11,5 @@ public class XAUSettings
     public bool UseAcrylic { get; set; }
     public bool PrivacyMode { get; set; }
     public bool OAuthLogin { get; set; }
+    public bool AutoGrabEventsToken { get; set; }
 }

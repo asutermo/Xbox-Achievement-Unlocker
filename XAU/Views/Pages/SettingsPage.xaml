@@ -229,6 +229,27 @@
             </ui:CardControl.Header>
             <ui:TextBox x:Name="XauthTextBox" TextChanged="XauthTextBox_OnTextChanged" />
         </ui:CardControl>
+        <ui:CardControl Margin="4,2">
+            <ui:CardControl.Header>
+                <Grid>
+                    <Grid.RowDefinitions>
+                        <RowDefinition Height="Auto" />
+                        <RowDefinition Height="Auto" />
+                    </Grid.RowDefinitions>
+                    <ui:TextBlock
+                        Grid.Row="0"
+                        FontTypography="Body"
+                        Text="Auto Grab Events Token"
+                        TextWrapping="WrapWithOverflow" />
+                    <ui:TextBlock
+                        Grid.Row="1"
+                        Foreground="{ui:ThemeResource TextFillColorSecondaryBrush}"
+                        Text="Automatically scan running game processes for the events token after login."
+                        TextWrapping="WrapWithOverflow" />
+                </Grid>
+            </ui:CardControl.Header>
+            <ui:ToggleSwitch Command="{Binding ViewModel.SaveSettingsCommand}" IsChecked="{Binding ViewModel.AutoGrabEventsToken, Mode=TwoWay}" />
+        </ui:CardControl>
         <ui:CardControl Margin="4,2" SizeChanged="EventsBoxGrid_OnSizeChanged">
             <ui:CardControl.Header>
                 <Grid>
@@ -241,11 +262,16 @@
                         FontTypography="Body"
                         Text="Events Token"
                         TextWrapping="WrapWithOverflow" />
-                    <ui:TextBlock
-                        Grid.Row="1"
-                        Foreground="{ui:ThemeResource TextFillColorSecondaryBrush}"
-                        Text="An account token for interacting with event-based activities, expiring 24 hours after creation."
-                        TextWrapping="WrapWithOverflow" />
+                    <StackPanel Grid.Row="1" Orientation="Horizontal">
+                        <ui:TextBlock
+                            Foreground="{ui:ThemeResource TextFillColorSecondaryBrush}"
+                            Text="Status: "
+                            TextWrapping="WrapWithOverflow" />
+                        <ui:TextBlock
+                            x:Name="EventsTokenStatus"
+                            Text="No Token"
+                            TextWrapping="WrapWithOverflow" />
+                    </StackPanel>
                 </Grid>
             </ui:CardControl.Header>
             <StackPanel Orientation="Horizontal">

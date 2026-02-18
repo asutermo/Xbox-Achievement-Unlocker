@@ -83,16 +83,6 @@ namespace XAU.ViewModels.Pages
         // "x:XBL3.0 x=" - events-specific token prefix used in the tickets header
         private const string EventsTokenScanPattern = "78 3A 58 42 4C 33 2E 30 20 78 3D";
 
-        private static readonly HashSet<string> SystemProcesses = new(StringComparer.OrdinalIgnoreCase)
-        {
-            "svchost", "csrss", "lsass", "smss", "services", "wininit", "winlogon",
-            "explorer", "dwm", "System", "Idle", "conhost", "RuntimeBroker",
-            "fontdrvhost", "sihost", "taskhostw", "dllhost", "WmiPrvSE",
-            "SearchHost", "StartMenuExperienceHost", "ShellExperienceHost",
-            "TextInputHost", "ctfmon", "SecurityHealthService", "spoolsv",
-            "XboxPcApp", "XboxPcAppFT"
-        };
-
         [RelayCommand]
         private void RefreshProfile()
         {
@@ -336,7 +326,6 @@ namespace XAU.ViewModels.Pages
             XauthWorker.WorkerReportsProgress = true;
             XauthWorker.RunWorkerAsync();
             EventsTokenWorker.DoWork += EventsTokenWorker_DoWork;
-            EventsTokenWorker.WorkerReportsProgress = true;
             if (!File.Exists(SettingsFilePath))
             {
                 if (!Directory.Exists(Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.MyDocuments),
@@ -523,8 +512,10 @@ namespace XAU.ViewModels.Pages
                 XAUTHTested = true;
                 InitComplete = true;
 
-                // Start events token auto-detection if not already found
-                if (string.IsNullOrEmpty(AchievementsViewModel.EventsToken) && !EventsTokenWorker.IsBusy)
+                // Auto-grab events token from a running game if the setting is enabled
+                if (Settings.AutoGrabEventsToken
+                    && string.IsNullOrEmpty(AchievementsViewModel.EventsToken)
+                    && !EventsTokenWorker.IsBusy)
                     EventsTokenWorker.RunWorkerAsync();
             }
             catch (HttpRequestException ex)
@@ -540,76 +531,100 @@ namespace XAU.ViewModels.Pages
         #endregion
 
         #region EventsToken
+        private bool solitaireLaunchedByUs = false;
+
         public void EventsTokenWorker_DoWork(object sender, DoWorkEventArgs e)
         {
             // Wait for login before scanning
             while (!IsLoggedIn)
             {
-                if (Settings.OAuthLogin) return; // OAuth path handles this already
+                if (Settings.OAuthLogin) return;
                 Thread.Sleep(2000);
             }
 
-            while (!eventsTokenFound && !Settings.OAuthLogin)
+            GrabEventsTokenFromSolitaire();
+        }
+
+        /// <summary>
+        /// Launches Solitaire (if needed), scans its memory for the events token,
+        /// and closes it again if we launched it.
+        /// </summary>
+        private void GrabEventsTokenFromSolitaire()
+        {
+            bool alreadyRunning = Process.GetProcessesByName(ProcessNames.Solitaire).Length > 0;
+
+            if (!alreadyRunning)
+            {
+                try
+                {
+                    var p = new Process();
+                    p.StartInfo = new ProcessStartInfo
+                    {
+                        UseShellExecute = true,
+                        FileName = AppLaunchUris.Solitaire
+                    };
+                    p.Start();
+                    solitaireLaunchedByUs = true;
+                }
+                catch
+                {
+                    // Solitaire may not be installed
+                    return;
+                }
+
+                // Wait for the process to appear
+                for (int i = 0; i < 15; i++)
+                {
+                    Thread.Sleep(1000);
+                    if (Process.GetProcessesByName(ProcessNames.Solitaire).Length > 0)
+                        break;
+                }
+            }
+
+            // Give Xbox Live services time to initialise inside the game
+            Thread.Sleep(10000);
+
+            // Retry the scan a few times - the token may not be in memory immediately
+            for (int attempt = 0; attempt < 6; attempt++)
             {
                 if (!string.IsNullOrEmpty(AchievementsViewModel.EventsToken))
                 {
                     eventsTokenFound = true;
-                    return;
+                    break;
                 }
 
-                try
-                {
-                    ScanProcessesForEventsToken();
-                }
-                catch
-                {
-                    // Silently continue - process access errors are expected
-                }
-
-                Thread.Sleep(5000);
-            }
-        }
-
-        private void ScanProcessesForEventsToken()
-        {
-            Process[] processes;
-            try
-            {
-                processes = Process.GetProcesses();
-            }
-            catch
-            {
-                return;
-            }
-
-            foreach (var proc in processes)
-            {
-                if (SystemProcesses.Contains(proc.ProcessName))
-                    continue;
-
-                // Skip our own process
-                try
-                {
-                    if (proc.Id == Environment.ProcessId)
-                        continue;
-                }
-                catch
-                {
-                    continue;
-                }
-
-                string token = TryExtractEventsTokenFromProcess(proc.Id);
+                string token = ScanSolitaireForToken();
                 if (!string.IsNullOrEmpty(token))
                 {
                     AchievementsViewModel.EventsToken = token;
                     eventsTokenFound = true;
-                    return;
+                    break;
                 }
+
+                Thread.Sleep(5000);
+            }
+
+            // Close Solitaire if we launched it
+            if (solitaireLaunchedByUs)
+            {
+                try
+                {
+                    foreach (var proc in Process.GetProcessesByName(ProcessNames.Solitaire))
+                        proc.Kill();
+                }
+                catch { }
+                solitaireLaunchedByUs = false;
             }
         }
 
-        private string TryExtractEventsTokenFromProcess(int pid)
+        private string ScanSolitaireForToken()
         {
+            var procs = Process.GetProcessesByName(ProcessNames.Solitaire);
+            if (procs.Length == 0)
+                return null;
+
+            int pid = procs[0].Id;
+
             try
             {
                 if (!eventsMem.OpenProcess(pid, out _))
@@ -619,7 +634,7 @@ namespace XAU.ViewModels.Pages
                 var results = eventsMem.AoBScan(EventsTokenScanPattern, true, false).Result;
                 if (results.Any())
                 {
-                    string token = FindMostCommonToken(results, "x:XBL3.0");
+                    string token = FindBestToken(results, "x:XBL3.0");
                     if (token != null)
                         return token;
                 }
@@ -629,20 +644,17 @@ namespace XAU.ViewModels.Pages
                 var fallbackResults = eventsMem.AoBScan(XAuthScanPattern, true, false).Result;
                 if (fallbackResults.Any())
                 {
-                    string token = FindEventsTokenByFrequency(fallbackResults);
+                    string token = FindFallbackEventsToken(fallbackResults);
                     if (token != null)
                         return "x:" + token;
                 }
             }
-            catch
-            {
-                // Process access errors are expected for many processes
-            }
+            catch { }
 
             return null;
         }
 
-        private string FindMostCommonToken(IEnumerable<long> addresses, string expectedPrefix)
+        private string FindBestToken(IEnumerable<long> addresses, string expectedPrefix)
         {
             var frequency = new Dictionary<string, int>();
             foreach (var address in addresses)
@@ -663,7 +675,7 @@ namespace XAU.ViewModels.Pages
             return frequency.OrderByDescending(p => p.Value).First().Key;
         }
 
-        private string FindEventsTokenByFrequency(IEnumerable<long> addresses)
+        private string FindFallbackEventsToken(IEnumerable<long> addresses)
         {
             var frequency = new Dictionary<string, int>();
             foreach (var address in addresses)
@@ -681,19 +693,32 @@ namespace XAU.ViewModels.Pages
             if (frequency.Count <= 1)
                 return null;
 
-            // The most frequent token is the regular auth token.
-            // Return the second most frequent as the events token candidate.
+            // Most frequent is the regular auth token; second is the events token.
             return frequency.OrderByDescending(p => p.Value).Skip(1).FirstOrDefault().Key;
         }
 
+        /// <summary>
+        /// Manually triggers a scan (from the "Grab from Game" button).
+        /// Works regardless of the auto-grab setting.
+        /// </summary>
         public void ScanForEventsTokenManual()
         {
             eventsTokenFound = false;
             AchievementsViewModel.EventsToken = null;
 
-            // If worker isn't running, start it
             if (!EventsTokenWorker.IsBusy)
                 EventsTokenWorker.RunWorkerAsync();
+        }
+
+        /// <summary>
+        /// Returns whether the current events token looks structurally valid.
+        /// </summary>
+        public static bool IsEventsTokenValid()
+        {
+            var token = AchievementsViewModel.EventsToken;
+            return !string.IsNullOrWhiteSpace(token)
+                && token.StartsWith("x:XBL3.0 x=")
+                && token.Length > 30;
         }
         #endregion
 
