@@ -1,3 +1,4 @@
+using System.Windows;
 using System.Windows.Controls;
 using Wpf.Ui.Common;
 using Wpf.Ui.Contracts;
@@ -10,11 +11,13 @@ namespace XAU.Views.Pages
     {
         public SettingsViewModel ViewModel { get; }
         private readonly ISnackbarService _snackbarService;
+        private readonly HomeViewModel _homeViewModel;
 
-        public SettingsPage(SettingsViewModel viewModel, ISnackbarService snackbarService)
+        public SettingsPage(SettingsViewModel viewModel, ISnackbarService snackbarService, HomeViewModel homeViewModel)
         {
             ViewModel = viewModel;
             _snackbarService = snackbarService;
+            _homeViewModel = homeViewModel;
             DataContext = this;
 
             ViewModel.OnNavigatedToEvent += (_, _) =>
@@ -63,6 +66,62 @@ namespace XAU.Views.Pages
         private void XAuthBox_OnSizeChanged(object sender, SizeChangedEventArgs e)
         {
             XauthTextBox.MaxWidth = e.NewSize.Width / 3;
+        }
+
+        private void GrabEventsToken_OnClick(object sender, RoutedEventArgs e)
+        {
+            if (!HomeViewModel._isLoggedIn)
+            {
+                _snackbarService.Show(
+                    "Not Logged In",
+                    "You must be logged in before scanning for an events token.",
+                    ControlAppearance.Danger,
+                    new SymbolIcon(SymbolRegular.ErrorCircle24)
+                );
+                return;
+            }
+
+            _snackbarService.Show(
+                "Scanning...",
+                "Looking for events token in running game processes.",
+                ControlAppearance.Info,
+                new SymbolIcon(SymbolRegular.Search24)
+            );
+
+            _homeViewModel.ScanForEventsTokenManual();
+
+            // Poll briefly for the result since the worker runs in the background
+            System.Threading.Tasks.Task.Run(async () =>
+            {
+                for (int i = 0; i < 10; i++)
+                {
+                    await System.Threading.Tasks.Task.Delay(1000);
+                    if (!string.IsNullOrEmpty(AchievementsViewModel.EventsToken))
+                    {
+                        Dispatcher.Invoke(() =>
+                        {
+                            EventsTokenBox.Text = AchievementsViewModel.EventsToken;
+                            _snackbarService.Show(
+                                "Events Token Found",
+                                "Successfully extracted events token from a running game.",
+                                ControlAppearance.Success,
+                                new SymbolIcon(SymbolRegular.Checkmark24)
+                            );
+                        });
+                        return;
+                    }
+                }
+
+                Dispatcher.Invoke(() =>
+                {
+                    _snackbarService.Show(
+                        "Events Token Not Found",
+                        "No events token found. Make sure a game (e.g. Solitaire) is running.",
+                        ControlAppearance.Caution,
+                        new SymbolIcon(SymbolRegular.Warning24)
+                    );
+                });
+            });
         }
 
         private void EventsBoxGrid_OnSizeChanged(object sender, SizeChangedEventArgs e)

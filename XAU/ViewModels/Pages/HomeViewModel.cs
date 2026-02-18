@@ -80,6 +80,18 @@ namespace XAU.ViewModels.Pages
         private readonly IContentDialogService _contentDialogService;
 
         private const string XAuthScanPattern = "58 42 4C 33 2E 30 20 78 3D";
+        // "x:XBL3.0 x=" - events-specific token prefix used in the tickets header
+        private const string EventsTokenScanPattern = "78 3A 58 42 4C 33 2E 30 20 78 3D";
+
+        private static readonly HashSet<string> SystemProcesses = new(StringComparer.OrdinalIgnoreCase)
+        {
+            "svchost", "csrss", "lsass", "smss", "services", "wininit", "winlogon",
+            "explorer", "dwm", "System", "Idle", "conhost", "RuntimeBroker",
+            "fontdrvhost", "sihost", "taskhostw", "dllhost", "WmiPrvSE",
+            "SearchHost", "StartMenuExperienceHost", "ShellExperienceHost",
+            "TextInputHost", "ctfmon", "SecurityHealthService", "spoolsv",
+            "XboxPcApp", "XboxPcAppFT"
+        };
 
         [RelayCommand]
         private void RefreshProfile()
@@ -88,9 +100,12 @@ namespace XAU.ViewModels.Pages
         }
 
         Mem m = new Mem();
+        Mem eventsMem = new Mem();
         public BackgroundWorker XauthWorker = new BackgroundWorker();
+        public BackgroundWorker EventsTokenWorker = new BackgroundWorker();
         bool IsAttached = false;
         bool GrabbedProfile = false;
+        bool eventsTokenFound = false;
         public static bool XAUTHTested = false;
         public static string XAUTH = "";
         public static string XUIDOnly;
@@ -320,6 +335,8 @@ namespace XAU.ViewModels.Pages
             XauthWorker.RunWorkerCompleted += XauthWorker_RunWorkerCompleted;
             XauthWorker.WorkerReportsProgress = true;
             XauthWorker.RunWorkerAsync();
+            EventsTokenWorker.DoWork += EventsTokenWorker_DoWork;
+            EventsTokenWorker.WorkerReportsProgress = true;
             if (!File.Exists(SettingsFilePath))
             {
                 if (!Directory.Exists(Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.MyDocuments),
@@ -505,6 +522,10 @@ namespace XAU.ViewModels.Pages
                 IsLoggedIn = true;
                 XAUTHTested = true;
                 InitComplete = true;
+
+                // Start events token auto-detection if not already found
+                if (string.IsNullOrEmpty(AchievementsViewModel.EventsToken) && !EventsTokenWorker.IsBusy)
+                    EventsTokenWorker.RunWorkerAsync();
             }
             catch (HttpRequestException ex)
             {
@@ -515,6 +536,164 @@ namespace XAU.ViewModels.Pages
 
                 }
             }
+        }
+        #endregion
+
+        #region EventsToken
+        public void EventsTokenWorker_DoWork(object sender, DoWorkEventArgs e)
+        {
+            // Wait for login before scanning
+            while (!IsLoggedIn)
+            {
+                if (Settings.OAuthLogin) return; // OAuth path handles this already
+                Thread.Sleep(2000);
+            }
+
+            while (!eventsTokenFound && !Settings.OAuthLogin)
+            {
+                if (!string.IsNullOrEmpty(AchievementsViewModel.EventsToken))
+                {
+                    eventsTokenFound = true;
+                    return;
+                }
+
+                try
+                {
+                    ScanProcessesForEventsToken();
+                }
+                catch
+                {
+                    // Silently continue - process access errors are expected
+                }
+
+                Thread.Sleep(5000);
+            }
+        }
+
+        private void ScanProcessesForEventsToken()
+        {
+            Process[] processes;
+            try
+            {
+                processes = Process.GetProcesses();
+            }
+            catch
+            {
+                return;
+            }
+
+            foreach (var proc in processes)
+            {
+                if (SystemProcesses.Contains(proc.ProcessName))
+                    continue;
+
+                // Skip our own process
+                try
+                {
+                    if (proc.Id == Environment.ProcessId)
+                        continue;
+                }
+                catch
+                {
+                    continue;
+                }
+
+                string token = TryExtractEventsTokenFromProcess(proc.Id);
+                if (!string.IsNullOrEmpty(token))
+                {
+                    AchievementsViewModel.EventsToken = token;
+                    eventsTokenFound = true;
+                    return;
+                }
+            }
+        }
+
+        private string TryExtractEventsTokenFromProcess(int pid)
+        {
+            try
+            {
+                if (!eventsMem.OpenProcess(pid, out _))
+                    return null;
+
+                // Primary: scan for events-specific "x:XBL3.0 x=" pattern
+                var results = eventsMem.AoBScan(EventsTokenScanPattern, true, false).Result;
+                if (results.Any())
+                {
+                    string token = FindMostCommonToken(results, "x:XBL3.0");
+                    if (token != null)
+                        return token;
+                }
+
+                // Fallback: scan for generic "XBL3.0 x=" and pick the least frequent
+                // (most frequent is the regular auth token used everywhere)
+                var fallbackResults = eventsMem.AoBScan(XAuthScanPattern, true, false).Result;
+                if (fallbackResults.Any())
+                {
+                    string token = FindEventsTokenByFrequency(fallbackResults);
+                    if (token != null)
+                        return "x:" + token;
+                }
+            }
+            catch
+            {
+                // Process access errors are expected for many processes
+            }
+
+            return null;
+        }
+
+        private string FindMostCommonToken(IEnumerable<long> addresses, string expectedPrefix)
+        {
+            var frequency = new Dictionary<string, int>();
+            foreach (var address in addresses)
+            {
+                string str = eventsMem.ReadString(address.ToString("X"), length: 10000);
+                if (string.IsNullOrEmpty(str) || !str.StartsWith(expectedPrefix) || str.Length < 20)
+                    continue;
+
+                if (!frequency.ContainsKey(str))
+                    frequency[str] = 1;
+                else
+                    frequency[str]++;
+            }
+
+            if (frequency.Count == 0)
+                return null;
+
+            return frequency.OrderByDescending(p => p.Value).First().Key;
+        }
+
+        private string FindEventsTokenByFrequency(IEnumerable<long> addresses)
+        {
+            var frequency = new Dictionary<string, int>();
+            foreach (var address in addresses)
+            {
+                string str = eventsMem.ReadString(address.ToString("X"), length: 10000);
+                if (string.IsNullOrEmpty(str) || !str.StartsWith("XBL3.0") || str.Length < 20)
+                    continue;
+
+                if (!frequency.ContainsKey(str))
+                    frequency[str] = 1;
+                else
+                    frequency[str]++;
+            }
+
+            if (frequency.Count <= 1)
+                return null;
+
+            // The most frequent token is the regular auth token.
+            // Return the second most frequent as the events token candidate.
+            return frequency.OrderByDescending(p => p.Value).Skip(1).FirstOrDefault().Key;
+        }
+
+        public void ScanForEventsTokenManual()
+        {
+            eventsTokenFound = false;
+            AchievementsViewModel.EventsToken = null;
+
+            // If worker isn't running, start it
+            if (!EventsTokenWorker.IsBusy)
+                EventsTokenWorker.RunWorkerAsync();
         }
         #endregion
 
