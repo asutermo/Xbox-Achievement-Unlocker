@@ -531,8 +531,12 @@ namespace XAU.ViewModels.Pages
         #region EventsToken
         private bool solitaireLaunchedByUs = false;
 
-        // How often to re-check the events token (set low for testing, raise to 6 hours for release)
-        private static readonly TimeSpan EventsTokenRefreshInterval = TimeSpan.FromSeconds(30);
+        // How often the worker loop checks (keep short so it responds to cleared tokens quickly)
+        private static readonly TimeSpan EventsTokenCheckInterval = TimeSpan.FromMinutes(1);
+        // How old a token can be before we proactively refresh it (~24h XSTS expiry, refresh early)
+        private static readonly TimeSpan EventsTokenMaxAge = TimeSpan.FromHours(23);
+
+        private static DateTime _eventsTokenObtainedAt = DateTime.MinValue;
 
         private static readonly string EventsLogPath = Path.Combine(
             Environment.GetFolderPath(Environment.SpecialFolder.MyDocuments), "XAU", "events_debug.log");
@@ -552,6 +556,10 @@ namespace XAU.ViewModels.Pages
             }
             EventsLog("Logged in, entering refresh loop");
 
+            // If a token already exists (e.g. from OAuth), mark it as fresh
+            if (!string.IsNullOrEmpty(AchievementsViewModel.EventsToken) && _eventsTokenObtainedAt == DateTime.MinValue)
+                _eventsTokenObtainedAt = DateTime.UtcNow;
+
             while (true)
             {
                 if (!Settings.AutoGrabEventsToken)
@@ -564,17 +572,35 @@ namespace XAU.ViewModels.Pages
                 var currentToken = AchievementsViewModel.EventsToken;
                 bool isEmpty = string.IsNullOrEmpty(currentToken);
                 bool isValid = !isEmpty && IsEventsTokenValid();
-                EventsLog($"Check: empty={isEmpty}, valid={isValid}, token={(isEmpty ? "(null)" : currentToken.Substring(0, Math.Min(30, currentToken.Length)) + "...")}");
+                var tokenAge = DateTime.UtcNow - _eventsTokenObtainedAt;
+                bool isExpired = !isEmpty && isValid && tokenAge > EventsTokenMaxAge;
 
-                if (isEmpty || !isValid)
+                EventsLog($"Check: empty={isEmpty}, valid={isValid}, age={tokenAge.TotalMinutes:F0}m, expired={isExpired}");
+
+                if (isEmpty || !isValid || isExpired)
                 {
-                    EventsLog("Token missing/invalid, starting grab...");
+                    if (isExpired)
+                        EventsLog($"Token expired (age: {tokenAge.TotalMinutes:F0}m > {EventsTokenMaxAge.TotalMinutes:F0}m), refreshing...");
+                    else
+                        EventsLog("Token missing/invalid, starting grab...");
+
+                    // Clear stale token before re-grabbing
+                    AchievementsViewModel.EventsToken = null;
                     GrabEventsTokenFromSolitaire();
-                    EventsLog($"Grab complete. Token now: {(string.IsNullOrEmpty(AchievementsViewModel.EventsToken) ? "(null)" : "found")}");
+
+                    if (!string.IsNullOrEmpty(AchievementsViewModel.EventsToken))
+                    {
+                        _eventsTokenObtainedAt = DateTime.UtcNow;
+                        EventsLog("Grab complete. Fresh token obtained.");
+                    }
+                    else
+                    {
+                        EventsLog("Grab complete. Token not found.");
+                    }
                 }
 
-                EventsLog($"Sleeping {EventsTokenRefreshInterval.TotalSeconds}s...");
-                Thread.Sleep(EventsTokenRefreshInterval);
+                EventsLog($"Sleeping {EventsTokenCheckInterval.TotalMinutes:F0}m...");
+                Thread.Sleep(EventsTokenCheckInterval);
             }
         }
 
@@ -647,6 +673,7 @@ namespace XAU.ViewModels.Pages
                 {
                     EventsLog($"Found token: {token.Substring(0, Math.Min(30, token.Length))}...");
                     AchievementsViewModel.EventsToken = token;
+                    _eventsTokenObtainedAt = DateTime.UtcNow;
                     eventsTokenFound = true;
                     break;
                 }
@@ -934,6 +961,7 @@ namespace XAU.ViewModels.Pages
             try
             {
                 AchievementsViewModel.EventsToken = $"x:XBL3.0 x={sisuResult.AuthorizationToken.XuiClaims.UserHash};{sisuResult.AuthorizationToken.Token}";
+                _eventsTokenObtainedAt = DateTime.UtcNow;
             }
             catch
             {

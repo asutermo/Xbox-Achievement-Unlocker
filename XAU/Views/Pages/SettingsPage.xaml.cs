@@ -1,5 +1,6 @@
 using System.Windows;
 using System.Windows.Controls;
+using System.Windows.Threading;
 using Wpf.Ui.Common;
 using Wpf.Ui.Contracts;
 using Wpf.Ui.Controls;
@@ -12,6 +13,8 @@ namespace XAU.Views.Pages
         public SettingsViewModel ViewModel { get; }
         private readonly ISnackbarService _snackbarService;
         private readonly HomeViewModel _homeViewModel;
+        private readonly DispatcherTimer _tokenRefreshTimer;
+        private string _lastKnownEventsToken;
 
         public SettingsPage(SettingsViewModel viewModel, ISnackbarService snackbarService, HomeViewModel homeViewModel)
         {
@@ -23,11 +26,27 @@ namespace XAU.Views.Pages
             ViewModel.OnNavigatedToEvent += (_, _) =>
             {
                 XauthTextBox.Text = HomeViewModel.XAUTH;
-                EventsTokenBox.Text = AchievementsViewModel.EventsToken;
-                UpdateEventsTokenStatus();
+                SyncEventsTokenUI();
             };
 
+            // Poll for background token changes every 3 seconds
+            _tokenRefreshTimer = new DispatcherTimer { Interval = TimeSpan.FromSeconds(3) };
+            _tokenRefreshTimer.Tick += (_, _) =>
+            {
+                var current = AchievementsViewModel.EventsToken;
+                if (current != _lastKnownEventsToken)
+                    SyncEventsTokenUI();
+            };
+            _tokenRefreshTimer.Start();
+
             InitializeComponent();
+        }
+
+        private void SyncEventsTokenUI()
+        {
+            _lastKnownEventsToken = AchievementsViewModel.EventsToken;
+            EventsTokenBox.Text = _lastKnownEventsToken;
+            UpdateEventsTokenStatus();
         }
 
         private void XauthTextBox_OnTextChanged(object sender, TextChangedEventArgs e)
