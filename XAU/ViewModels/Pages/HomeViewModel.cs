@@ -538,13 +538,8 @@ namespace XAU.ViewModels.Pages
 
         private static DateTime _eventsTokenObtainedAt = DateTime.MinValue;
 
-        private static readonly string EventsLogPath = Path.Combine(
-            Environment.GetFolderPath(Environment.SpecialFolder.MyDocuments), "XAU", "events_debug.log");
-        private static void EventsLog(string msg)
-        {
-            try { File.AppendAllText(EventsLogPath, $"[{DateTime.Now:HH:mm:ss}] {msg}\n"); }
-            catch { }
-        }
+        private static void EventsLog(string msg) => Debug.WriteLine($"[EventsToken] {msg}");
+
 
         private void PersistEventsToken()
         {
