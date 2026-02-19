@@ -631,7 +631,7 @@ namespace XAU.ViewModels.Pages
                     return null;
 
                 // Primary: scan for events-specific "x:XBL3.0 x=" pattern
-                var results = eventsMem.AoBScan(EventsTokenScanPattern, true, false).Result;
+                var results = eventsMem.AoBScan(EventsTokenScanPattern, true).Result;
                 if (results.Any())
                 {
                     string token = FindBestToken(results, "x:XBL3.0");
@@ -641,7 +641,7 @@ namespace XAU.ViewModels.Pages
 
                 // Fallback: scan for generic "XBL3.0 x=" and pick the least frequent
                 // (most frequent is the regular auth token used everywhere)
-                var fallbackResults = eventsMem.AoBScan(XAuthScanPattern, true, false).Result;
+                var fallbackResults = eventsMem.AoBScan(XAuthScanPattern, true).Result;
                 if (fallbackResults.Any())
                 {
                     string token = FindFallbackEventsToken(fallbackResults);

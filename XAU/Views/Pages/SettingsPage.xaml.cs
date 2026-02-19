@@ -85,17 +85,19 @@ namespace XAU.Views.Pages
 
             _snackbarService.Show(
                 "Scanning...",
-                "Looking for events token in running game processes.",
+                "Launching Solitaire and scanning for events token. This may take up to a minute.",
                 ControlAppearance.Info,
                 new SymbolIcon(SymbolRegular.Search24)
             );
 
+            GrabEventsTokenButton.IsEnabled = false;
             _homeViewModel.ScanForEventsTokenManual();
 
-            // Poll briefly for the result since the worker runs in the background
+            // Poll for the result - the worker may take up to ~60s
+            // (process launch + Xbox Live init + scan retries)
             System.Threading.Tasks.Task.Run(async () =>
             {
-                for (int i = 0; i < 10; i++)
+                for (int i = 0; i < 65; i++)
                 {
                     await System.Threading.Tasks.Task.Delay(1000);
                     if (!string.IsNullOrEmpty(AchievementsViewModel.EventsToken))
@@ -104,9 +106,10 @@ namespace XAU.Views.Pages
                         {
                             EventsTokenBox.Text = AchievementsViewModel.EventsToken;
                             UpdateEventsTokenStatus();
+                            GrabEventsTokenButton.IsEnabled = true;
                             _snackbarService.Show(
                                 "Events Token Found",
-                                "Successfully extracted events token from a running game.",
+                                "Successfully extracted events token from Solitaire.",
                                 ControlAppearance.Success,
                                 new SymbolIcon(SymbolRegular.Checkmark24)
                             );
@@ -117,9 +120,10 @@ namespace XAU.Views.Pages
 
                 Dispatcher.Invoke(() =>
                 {
+                    GrabEventsTokenButton.IsEnabled = true;
                     _snackbarService.Show(
                         "Events Token Not Found",
-                        "No events token found. Make sure a game (e.g. Solitaire) is running.",
+                        "Could not find events token. Make sure Solitaire is installed.",
                         ControlAppearance.Caution,
                         new SymbolIcon(SymbolRegular.Warning24)
                     );
