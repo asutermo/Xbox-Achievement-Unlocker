@@ -820,9 +820,17 @@ namespace XAU.ViewModels.Pages
         {
             eventsTokenFound = false;
             AchievementsViewModel.EventsToken = null;
+            _eventsTokenObtainedAt = DateTime.MinValue;
 
-            if (!EventsTokenWorker.IsBusy)
-                EventsTokenWorker.RunWorkerAsync();
+            System.Threading.Tasks.Task.Run(() =>
+            {
+                GrabEventsTokenFromSolitaire();
+                if (!string.IsNullOrEmpty(AchievementsViewModel.EventsToken))
+                {
+                    _eventsTokenObtainedAt = DateTime.UtcNow;
+                    PersistEventsToken();
+                }
+            });
         }
 
         /// <summary>
