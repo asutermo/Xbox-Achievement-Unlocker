@@ -799,17 +799,21 @@ namespace XAU.ViewModels.Pages
                 if (string.IsNullOrEmpty(str) || !str.StartsWith("XBL3.0") || str.Length < 20)
                     continue;
 
+                // Skip the exact XAuth token — we want a different token (events)
+                if (str == XAUTH)
+                    continue;
+
                 if (!frequency.ContainsKey(str))
                     frequency[str] = 1;
                 else
                     frequency[str]++;
             }
 
-            if (frequency.Count <= 1)
+            if (frequency.Count == 0)
                 return null;
 
-            // Most frequent is the regular auth token; second is the events token.
-            return frequency.OrderByDescending(p => p.Value).Skip(1).FirstOrDefault().Key;
+            // Most frequent remaining token should be the events token
+            return frequency.OrderByDescending(p => p.Value).First().Key;
         }
 
         /// <summary>
