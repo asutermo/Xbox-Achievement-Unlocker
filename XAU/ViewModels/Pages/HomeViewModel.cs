@@ -581,9 +581,8 @@ namespace XAU.ViewModels.Pages
 
             while (true)
             {
-                if (!Settings.AutoGrabEventsToken)
+                if (!Settings.AutoGrabEventsToken || !IsLoggedIn)
                 {
-                    EventsLog("Auto-grab disabled, sleeping...");
                     Thread.Sleep(5000);
                     continue;
                 }
@@ -1020,6 +1019,8 @@ namespace XAU.ViewModels.Pages
             Gamepass = "Gamepass: Unknown";
             Bio = "Bio: Unknown";
             Watermarks.Clear();
+            AchievementsViewModel.EventsToken = null;
+            _eventsTokenObtainedAt = DateTime.MinValue;
             XauthWorker_ProgressChanged(null, null);
         }
 
