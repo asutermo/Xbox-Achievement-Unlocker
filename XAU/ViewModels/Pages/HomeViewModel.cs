@@ -548,11 +548,6 @@ namespace XAU.ViewModels.Pages
             // Wait for login before scanning
             while (!IsLoggedIn)
             {
-                if (Settings.OAuthLogin)
-                {
-                    EventsLog("OAuth login detected, exiting worker");
-                    return;
-                }
                 Thread.Sleep(2000);
             }
             EventsLog("Logged in, entering refresh loop");
@@ -948,6 +943,10 @@ namespace XAU.ViewModels.Pages
             XauthWorker_ProgressChanged(null, null);
             if (IsLoggedIn && !GrabbedProfile)
                 GrabProfile();
+
+            // Start the events token worker to periodically check/refresh the token
+            if (Settings.AutoGrabEventsToken && !EventsTokenWorker.IsBusy)
+                EventsTokenWorker.RunWorkerAsync();
         }
         private void ClearProfileState()
         {
