@@ -50,14 +50,10 @@ namespace XAU.Views.Pages
 
         private void EventsToken_OnTextChanged(object sender, TextChangedEventArgs e)
         {
-            if (string.IsNullOrWhiteSpace(EventsTokenBox.Text) || string.IsNullOrEmpty(EventsTokenBox.Text))
+            if (string.IsNullOrWhiteSpace(EventsTokenBox.Text))
             {
-                _snackbarService.Show(
-                    "Error",
-                    "Events Token cannot be empty/whitespace",
-                    ControlAppearance.Danger,
-                    new SymbolIcon(SymbolRegular.ErrorCircle24)
-                );
+                AchievementsViewModel.EventsToken = null;
+                UpdateEventsTokenStatus();
                 return;
             }
 

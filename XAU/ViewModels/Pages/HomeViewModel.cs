@@ -512,10 +512,8 @@ namespace XAU.ViewModels.Pages
                 XAUTHTested = true;
                 InitComplete = true;
 
-                // Auto-grab events token from a running game if the setting is enabled
-                if (Settings.AutoGrabEventsToken
-                    && string.IsNullOrEmpty(AchievementsViewModel.EventsToken)
-                    && !EventsTokenWorker.IsBusy)
+                // Start the events token worker to periodically check/refresh the token
+                if (Settings.AutoGrabEventsToken && !EventsTokenWorker.IsBusy)
                     EventsTokenWorker.RunWorkerAsync();
             }
             catch (HttpRequestException ex)
@@ -533,16 +531,56 @@ namespace XAU.ViewModels.Pages
         #region EventsToken
         private bool solitaireLaunchedByUs = false;
 
+        // How often to re-check the events token (set low for testing, raise to 6 hours for release)
+        private static readonly TimeSpan EventsTokenRefreshInterval = TimeSpan.FromSeconds(30);
+
+        private static readonly string EventsLogPath = Path.Combine(
+            Environment.GetFolderPath(Environment.SpecialFolder.MyDocuments), "XAU", "events_debug.log");
+        private static void EventsLog(string msg)
+        {
+            try { File.AppendAllText(EventsLogPath, $"[{DateTime.Now:HH:mm:ss}] {msg}\n"); }
+            catch { }
+        }
+
         public void EventsTokenWorker_DoWork(object sender, DoWorkEventArgs e)
         {
+            EventsLog("Worker started");
             // Wait for login before scanning
             while (!IsLoggedIn)
             {
-                if (Settings.OAuthLogin) return;
+                if (Settings.OAuthLogin)
+                {
+                    EventsLog("OAuth login detected, exiting worker");
+                    return;
+                }
                 Thread.Sleep(2000);
             }
+            EventsLog("Logged in, entering refresh loop");
 
-            GrabEventsTokenFromSolitaire();
+            while (true)
+            {
+                if (!Settings.AutoGrabEventsToken)
+                {
+                    EventsLog("Auto-grab disabled, sleeping...");
+                    Thread.Sleep(5000);
+                    continue;
+                }
+
+                var currentToken = AchievementsViewModel.EventsToken;
+                bool isEmpty = string.IsNullOrEmpty(currentToken);
+                bool isValid = !isEmpty && IsEventsTokenValid();
+                EventsLog($"Check: empty={isEmpty}, valid={isValid}, token={(isEmpty ? "(null)" : currentToken.Substring(0, Math.Min(30, currentToken.Length)) + "...")}");
+
+                if (isEmpty || !isValid)
+                {
+                    EventsLog("Token missing/invalid, starting grab...");
+                    GrabEventsTokenFromSolitaire();
+                    EventsLog($"Grab complete. Token now: {(string.IsNullOrEmpty(AchievementsViewModel.EventsToken) ? "(null)" : "found")}");
+                }
+
+                EventsLog($"Sleeping {EventsTokenRefreshInterval.TotalSeconds}s...");
+                Thread.Sleep(EventsTokenRefreshInterval);
+            }
         }
 
         /// <summary>
@@ -552,11 +590,13 @@ namespace XAU.ViewModels.Pages
         private void GrabEventsTokenFromSolitaire()
         {
             bool alreadyRunning = Process.GetProcessesByName(ProcessNames.Solitaire).Length > 0;
+            EventsLog($"Solitaire already running: {alreadyRunning}");
 
             if (!alreadyRunning)
             {
                 try
                 {
+                    EventsLog("Launching Solitaire...");
                     var p = new Process();
                     p.StartInfo = new ProcessStartInfo
                     {
@@ -566,9 +606,9 @@ namespace XAU.ViewModels.Pages
                     p.Start();
                     solitaireLaunchedByUs = true;
                 }
-                catch
+                catch (Exception ex)
                 {
-                    // Solitaire may not be installed
+                    EventsLog($"Failed to launch Solitaire: {ex.Message}");
                     return;
                 }
 
@@ -577,18 +617,32 @@ namespace XAU.ViewModels.Pages
                 {
                     Thread.Sleep(1000);
                     if (Process.GetProcessesByName(ProcessNames.Solitaire).Length > 0)
+                    {
+                        EventsLog($"Solitaire process appeared after {i + 1}s");
                         break;
+                    }
+                }
+
+                if (Process.GetProcessesByName(ProcessNames.Solitaire).Length == 0)
+                {
+                    EventsLog("Solitaire never appeared after 15s");
+                    solitaireLaunchedByUs = false;
+                    return;
                 }
             }
 
             // Give Xbox Live services time to initialise inside the game
+            EventsLog("Waiting 10s for Xbox Live init...");
             Thread.Sleep(10000);
 
             // Retry the scan a few times - the token may not be in memory immediately
             for (int attempt = 0; attempt < 6; attempt++)
             {
+                EventsLog($"Scan attempt {attempt + 1}/6");
+
                 if (!string.IsNullOrEmpty(AchievementsViewModel.EventsToken))
                 {
+                    EventsLog("Token already set externally, done");
                     eventsTokenFound = true;
                     break;
                 }
@@ -596,13 +650,18 @@ namespace XAU.ViewModels.Pages
                 string token = ScanSolitaireForToken();
                 if (!string.IsNullOrEmpty(token))
                 {
+                    EventsLog($"Found token: {token.Substring(0, Math.Min(30, token.Length))}...");
                     AchievementsViewModel.EventsToken = token;
                     eventsTokenFound = true;
                     break;
                 }
 
+                EventsLog("No token found, waiting 5s before retry...");
                 Thread.Sleep(5000);
             }
+
+            if (!eventsTokenFound)
+                EventsLog("All scan attempts failed");
 
             // Close Solitaire if we launched it
             if (solitaireLaunchedByUs)
@@ -621,35 +680,50 @@ namespace XAU.ViewModels.Pages
         {
             var procs = Process.GetProcessesByName(ProcessNames.Solitaire);
             if (procs.Length == 0)
+            {
+                EventsLog("ScanSolitaire: no Solitaire process found");
                 return null;
+            }
 
             int pid = procs[0].Id;
+            EventsLog($"ScanSolitaire: found PID {pid}");
 
             try
             {
-                if (!eventsMem.OpenProcess(pid, out _))
+                if (!eventsMem.OpenProcess(pid, out string failReason))
+                {
+                    EventsLog($"ScanSolitaire: OpenProcess failed: {failReason}");
                     return null;
+                }
 
                 // Primary: scan for events-specific "x:XBL3.0 x=" pattern
+                EventsLog("ScanSolitaire: primary scan for 'x:XBL3.0 x='...");
                 var results = eventsMem.AoBScan(EventsTokenScanPattern, true).Result;
+                EventsLog($"ScanSolitaire: primary scan found {results.Count()} matches");
                 if (results.Any())
                 {
                     string token = FindBestToken(results, "x:XBL3.0");
                     if (token != null)
                         return token;
+                    EventsLog("ScanSolitaire: primary matches didn't yield a valid token");
                 }
 
                 // Fallback: scan for generic "XBL3.0 x=" and pick the least frequent
-                // (most frequent is the regular auth token used everywhere)
+                EventsLog("ScanSolitaire: fallback scan for 'XBL3.0 x='...");
                 var fallbackResults = eventsMem.AoBScan(XAuthScanPattern, true).Result;
+                EventsLog($"ScanSolitaire: fallback scan found {fallbackResults.Count()} matches");
                 if (fallbackResults.Any())
                 {
                     string token = FindFallbackEventsToken(fallbackResults);
                     if (token != null)
                         return "x:" + token;
+                    EventsLog("ScanSolitaire: fallback matches didn't yield a valid token");
                 }
             }
-            catch { }
+            catch (Exception ex)
+            {
+                EventsLog($"ScanSolitaire: exception: {ex.Message}");
+            }
 
             return null;
         }
@@ -1085,6 +1159,7 @@ namespace XAU.ViewModels.Pages
             Settings.UseAcrylic = settings.UseAcrylic;
             Settings.PrivacyMode = settings.PrivacyMode;
             Settings.OAuthLogin = settings.OAuthLogin;
+            Settings.AutoGrabEventsToken = settings.AutoGrabEventsToken;
         }
 
         #endregion
