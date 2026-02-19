@@ -700,9 +700,35 @@ namespace XAU.ViewModels.Pages
             if (authToken != null)
             {
                 EventsLog($"  AuthToken: hash={authToken.XuiClaims?.UserHash}, expires={authToken.ExpireOn}");
-                // Log first 40 chars of token to verify format
-                var tokenPreview = authToken.Token?.Length > 40 ? authToken.Token.Substring(0, 40) + "..." : authToken.Token;
-                EventsLog($"  Token preview: {tokenPreview}");
+                // Decode and log the full JWE header to verify RP/audience
+                try
+                {
+                    var token = authToken.Token;
+                    if (!string.IsNullOrEmpty(token))
+                    {
+                        var firstDot = token.IndexOf('.');
+                        if (firstDot > 0)
+                        {
+                            var headerB64 = token.Substring(0, firstDot);
+                            // Fix base64url padding
+                            var padded = headerB64.Replace('-', '+').Replace('_', '/');
+                            switch (padded.Length % 4)
+                            {
+                                case 2: padded += "=="; break;
+                                case 3: padded += "="; break;
+                            }
+                            var headerJson = Encoding.UTF8.GetString(Convert.FromBase64String(padded));
+                            EventsLog($"  JWE Header: {headerJson}");
+                        }
+                        // Log token length and part count for format comparison
+                        var parts = token.Split('.');
+                        EventsLog($"  Token parts: {parts.Length}, total length: {token.Length}");
+                    }
+                }
+                catch (Exception ex)
+                {
+                    EventsLog($"  Header decode error: {ex.Message}");
+                }
             }
             if (sisuResult.TitleToken != null)
                 EventsLog($"  TitleToken: expires={sisuResult.TitleToken.ExpireOn}");
