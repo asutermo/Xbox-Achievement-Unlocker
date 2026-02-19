@@ -18,6 +18,7 @@ using XboxAuthNet.OAuth;
 using XboxAuthNet.OAuth.CodeFlow;
 using XboxAuthNet.XboxLive;
 using XboxAuthNet.XboxLive.Requests;
+using XboxAuthNet.XboxLive.Responses;
 
 namespace XAU.ViewModels.Pages
 {
@@ -82,6 +83,11 @@ namespace XAU.ViewModels.Pages
         private const string XAuthScanPattern = "58 42 4C 33 2E 30 20 78 3D";
         // "x:XBL3.0 x=" - events-specific token prefix used in the tickets header
         private const string EventsTokenScanPattern = "78 3A 58 42 4C 33 2E 30 20 78 3D";
+        // UTF-16LE versions for scanning managed (.NET/WinRT) strings
+        // "XBL3.0 x=" in UTF-16LE: each ASCII char followed by 0x00
+        private const string XAuthScanPatternW = "58 00 42 00 4C 00 33 00 2E 00 30 00 20 00 78 00 3D 00";
+        // "x:XBL3.0 x=" in UTF-16LE
+        private const string EventsTokenScanPatternW = "78 00 3A 00 58 00 42 00 4C 00 33 00 2E 00 30 00 20 00 78 00 3D 00";
 
         [RelayCommand]
         private void RefreshProfile()
@@ -537,8 +543,23 @@ namespace XAU.ViewModels.Pages
         private static readonly TimeSpan EventsTokenMaxAge = TimeSpan.FromHours(23);
 
         private static DateTime _eventsTokenObtainedAt = DateTime.MinValue;
+        // The user hash for the events relying party - used to identify the correct token in memory
+        private static string _eventsUserHash = null;
 
-        private static void EventsLog(string msg) => Debug.WriteLine($"[EventsToken] {msg}");
+        private static readonly string EventsLogPath = Path.Combine(
+            Environment.GetFolderPath(Environment.SpecialFolder.MyDocuments), "XAU", "events_debug.log");
+
+        private static void EventsLog(string msg)
+        {
+            var line = $"[{DateTime.Now:HH:mm:ss}] {msg}";
+            Debug.WriteLine($"[EventsToken] {msg}");
+            try
+            {
+                Directory.CreateDirectory(Path.GetDirectoryName(EventsLogPath)!);
+                File.AppendAllText(EventsLogPath, line + Environment.NewLine);
+            }
+            catch { /* best-effort */ }
+        }
 
 
         private void PersistEventsToken()
@@ -547,6 +568,7 @@ namespace XAU.ViewModels.Pages
             {
                 Settings.CachedEventsToken = AchievementsViewModel.EventsToken;
                 Settings.EventsTokenObtainedAt = _eventsTokenObtainedAt;
+                Settings.EventsUserHash = _eventsUserHash;
                 var json = JsonConvert.SerializeObject(Settings);
                 File.WriteAllText(SettingsFilePath, json);
             }
@@ -598,29 +620,94 @@ namespace XAU.ViewModels.Pages
                 if (isEmpty || !isValid || isExpired)
                 {
                     if (isExpired)
-                        EventsLog($"Token expired (age: {tokenAge.TotalMinutes:F0}m > {EventsTokenMaxAge.TotalMinutes:F0}m), refreshing...");
+                        EventsLog($"Token expired (age: {tokenAge.TotalMinutes:F0}m > {EventsTokenMaxAge.TotalMinutes:F0}m), refreshing via SISU...");
                     else
-                        EventsLog("Token missing/invalid, starting grab...");
+                        EventsLog("Token missing/invalid, refreshing via SISU...");
 
-                    // Clear stale token before re-grabbing
-                    AchievementsViewModel.EventsToken = null;
-                    GrabEventsTokenFromSolitaire();
+                    RefreshEventsTokenViaSisu();
 
                     if (!string.IsNullOrEmpty(AchievementsViewModel.EventsToken))
                     {
                         _eventsTokenObtainedAt = DateTime.UtcNow;
                         PersistEventsToken();
-                        EventsLog("Grab complete. Fresh token obtained and saved.");
+                        EventsLog("SISU refresh complete. Fresh events token obtained and saved.");
                     }
                     else
                     {
-                        EventsLog("Grab complete. Token not found.");
+                        EventsLog("SISU refresh failed. No token obtained.");
                     }
                 }
 
                 EventsLog($"Sleeping {EventsTokenCheckInterval.TotalMinutes:F0}m...");
                 Thread.Sleep(EventsTokenCheckInterval);
             }
+        }
+
+        private void RefreshEventsTokenViaSisu()
+        {
+            try
+            {
+                var session = readSession();
+                if (session == null || string.IsNullOrEmpty(session.AccessToken))
+                {
+                    EventsLog("Refresh: no saved session/access token");
+                    return;
+                }
+
+                EventsLog("Refresh: requesting device token...");
+                var deviceToken = xboxSignedClient.RequestDeviceToken(XboxDeviceTypes.Win32, "0.0.0").GetAwaiter().GetResult();
+
+                // Use SISU with Solitaire's MSA App ID for title-scoped events token
+                var eventsToken = RequestEventsTokenViaSisu(session.AccessToken, deviceToken.Token, XboxGameTitles.Solitaire).GetAwaiter().GetResult();
+                if (eventsToken != null)
+                {
+                    _eventsUserHash = eventsToken.XuiClaims?.UserHash;
+                    AchievementsViewModel.EventsToken = $"x:XBL3.0 x={_eventsUserHash};{eventsToken.Token}";
+                    EventsLog($"SISU refresh success: hash={_eventsUserHash}");
+                }
+                else
+                {
+                    EventsLog("SISU refresh returned null");
+                }
+            }
+            catch (Exception ex)
+            {
+                EventsLog($"SISU refresh error: {ex.Message}");
+            }
+        }
+
+        /// <summary>
+        /// Use SISU to get an events token with a real game's MSA App ID.
+        /// SISU is the only endpoint that can produce events RP tokens (direct XSTS returns 8015dc37).
+        /// Using a game's MSA App ID instead of Xbox App PC should produce a properly title-scoped token.
+        /// </summary>
+        private async Task<XboxAuthResponse?> RequestEventsTokenViaSisu(string accessToken, string deviceToken, string gameAppId)
+        {
+            EventsLog($"SISU events: requesting with AppId={gameAppId}, RP={XboxAuthConstants.XboxEventsRelyingParty}");
+            var sisuResult = await xboxSignedClient.SisuAuth(new XboxSisuAuthRequest
+            {
+                AccessToken = accessToken,
+                ClientId = gameAppId,
+                DeviceToken = deviceToken,
+                RelyingParty = XboxAuthConstants.XboxEventsRelyingParty,
+            });
+
+            EventsLog($"SISU events response: AuthToken={sisuResult.AuthorizationToken != null}, " +
+                       $"TitleToken={sisuResult.TitleToken != null}, " +
+                       $"UserToken={sisuResult.UserToken != null}");
+
+            var authToken = sisuResult.AuthorizationToken;
+            if (authToken != null)
+            {
+                EventsLog($"  AuthToken: hash={authToken.XuiClaims?.UserHash}, expires={authToken.ExpireOn}");
+                // Log first 40 chars of token to verify format
+                var tokenPreview = authToken.Token?.Length > 40 ? authToken.Token.Substring(0, 40) + "..." : authToken.Token;
+                EventsLog($"  Token preview: {tokenPreview}");
+            }
+            if (sisuResult.TitleToken != null)
+                EventsLog($"  TitleToken: expires={sisuResult.TitleToken.ExpireOn}");
+
+            return authToken;
         }
 
         /// <summary>
@@ -671,14 +758,17 @@ namespace XAU.ViewModels.Pages
                 }
             }
 
-            // Give Xbox Live services time to initialise inside the game
-            EventsLog("Waiting 10s for Xbox Live init...");
-            Thread.Sleep(10000);
+            // Give Xbox Live services time to initialise and fire initial telemetry events.
+            // The events XSTS token only appears in memory after the game actually sends events,
+            // which can take 20-40s after launch (Xbox Live init + first telemetry batch).
+            EventsLog("Waiting 20s for Xbox Live init + initial events...");
+            Thread.Sleep(20000);
 
-            // Retry the scan a few times - the token may not be in memory immediately
-            for (int attempt = 0; attempt < 6; attempt++)
+            // Retry the scan over ~2 minutes - events may not fire immediately
+            const int maxAttempts = 18;
+            for (int attempt = 0; attempt < maxAttempts; attempt++)
             {
-                EventsLog($"Scan attempt {attempt + 1}/6");
+                EventsLog($"Scan attempt {attempt + 1}/{maxAttempts}");
 
                 if (!string.IsNullOrEmpty(AchievementsViewModel.EventsToken))
                 {
@@ -697,12 +787,12 @@ namespace XAU.ViewModels.Pages
                     break;
                 }
 
-                EventsLog("No token found, waiting 5s before retry...");
-                Thread.Sleep(5000);
+                EventsLog("No token found, waiting 7s before retry...");
+                Thread.Sleep(7000);
             }
 
             if (!eventsTokenFound)
-                EventsLog("All scan attempts failed");
+                EventsLog("All scan attempts failed (scanned for ~2.5 minutes)");
 
             // Close Solitaire if we launched it
             if (solitaireLaunchedByUs)
@@ -737,28 +827,51 @@ namespace XAU.ViewModels.Pages
                     return null;
                 }
 
-                // Primary: scan for events-specific "x:XBL3.0 x=" pattern
-                EventsLog("ScanSolitaire: primary scan for 'x:XBL3.0 x='...");
-                var results = eventsMem.AoBScan(EventsTokenScanPattern, true).Result;
-                EventsLog($"ScanSolitaire: primary scan found {results.Count()} matches");
+                // === ASCII scans (HTTP wire buffers) ===
+                EventsLog("ScanSolitaire: ASCII primary scan for 'x:XBL3.0 x='...");
+                var results = eventsMem.AoBScan(0, long.MaxValue, EventsTokenScanPattern, true, true, true, false).Result;
+                EventsLog($"ScanSolitaire: ASCII primary found {results.Count()} matches");
                 if (results.Any())
                 {
-                    string token = FindBestToken(results, "x:XBL3.0");
+                    string token = FindBestToken(results, "x:XBL3.0", Encoding.UTF8);
                     if (token != null)
                         return token;
-                    EventsLog("ScanSolitaire: primary matches didn't yield a valid token");
+                    EventsLog("ScanSolitaire: ASCII primary didn't yield a valid token");
                 }
 
-                // Fallback: scan for generic "XBL3.0 x=" and pick the least frequent
-                EventsLog("ScanSolitaire: fallback scan for 'XBL3.0 x='...");
-                var fallbackResults = eventsMem.AoBScan(XAuthScanPattern, true).Result;
-                EventsLog($"ScanSolitaire: fallback scan found {fallbackResults.Count()} matches");
-                if (fallbackResults.Any())
+                // === UTF-16 scans (managed/WinRT strings) ===
+                EventsLog("ScanSolitaire: UTF-16 primary scan for 'x:XBL3.0 x='...");
+                var resultsW = eventsMem.AoBScan(0, long.MaxValue, EventsTokenScanPatternW, true, true, true, false).Result;
+                EventsLog($"ScanSolitaire: UTF-16 primary found {resultsW.Count()} matches");
+                if (resultsW.Any())
                 {
-                    string token = FindFallbackEventsToken(fallbackResults);
+                    string token = FindBestToken(resultsW, "x:XBL3.0", Encoding.Unicode);
+                    if (token != null)
+                        return token;
+                    EventsLog("ScanSolitaire: UTF-16 primary didn't yield a valid token");
+                }
+
+                EventsLog("ScanSolitaire: UTF-16 fallback scan for 'XBL3.0 x='...");
+                var fallbackW = eventsMem.AoBScan(0, long.MaxValue, XAuthScanPatternW, true, true, true, false).Result;
+                EventsLog($"ScanSolitaire: UTF-16 fallback found {fallbackW.Count()} matches");
+                if (fallbackW.Any())
+                {
+                    string token = FindFallbackEventsToken(fallbackW, Encoding.Unicode);
                     if (token != null)
                         return "x:" + token;
-                    EventsLog("ScanSolitaire: fallback matches didn't yield a valid token");
+                    EventsLog("ScanSolitaire: UTF-16 fallback didn't yield a valid token");
+                }
+
+                // === ASCII fallback (least reliable) ===
+                EventsLog("ScanSolitaire: ASCII fallback scan for 'XBL3.0 x='...");
+                var fallbackResults = eventsMem.AoBScan(0, long.MaxValue, XAuthScanPattern, true, true, true, false).Result;
+                EventsLog($"ScanSolitaire: ASCII fallback found {fallbackResults.Count()} matches");
+                if (fallbackResults.Any())
+                {
+                    string token = FindFallbackEventsToken(fallbackResults, Encoding.UTF8);
+                    if (token != null)
+                        return "x:" + token;
+                    EventsLog("ScanSolitaire: ASCII fallback didn't yield a valid token");
                 }
             }
             catch (Exception ex)
@@ -769,19 +882,36 @@ namespace XAU.ViewModels.Pages
             return null;
         }
 
-        private string FindBestToken(IEnumerable<long> addresses, string expectedPrefix)
+        private string FindBestToken(IEnumerable<long> addresses, string expectedPrefix, Encoding encoding)
         {
             var frequency = new Dictionary<string, int>();
             foreach (var address in addresses)
             {
-                string str = eventsMem.ReadString(address.ToString("X"), length: 10000);
-                if (string.IsNullOrEmpty(str) || !str.StartsWith(expectedPrefix) || str.Length < 20)
+                string raw = eventsMem.ReadString(address.ToString("X"), length: 10000, stringEncoding: encoding);
+                EventsLog($"FindBestToken({encoding.EncodingName}): addr=0x{address:X}, rawLen={raw?.Length ?? -1}, first80={Truncate(raw, 80)}");
+
+                if (string.IsNullOrEmpty(raw))
                     continue;
 
-                if (!frequency.ContainsKey(str))
-                    frequency[str] = 1;
+                // The token in the tickets header is: x:XBL3.0 x={hash};{jwt}
+                // ReadString may include trailing data after the token (quotes, semicolons, next entries).
+                // Extract just the token: starts at beginning, ends at first quote or null.
+                string token = raw;
+
+                // Trim at first double-quote (end of value in tickets header: ..."x:XBL3.0 x=...jwt";"next"=...)
+                int quoteIdx = token.IndexOf('"');
+                if (quoteIdx > 0)
+                    token = token.Substring(0, quoteIdx);
+
+                EventsLog($"FindBestToken({encoding.EncodingName}): cleaned tokenLen={token.Length}, first80={Truncate(token, 80)}");
+
+                if (!token.StartsWith(expectedPrefix) || token.Length < 20)
+                    continue;
+
+                if (!frequency.ContainsKey(token))
+                    frequency[token] = 1;
                 else
-                    frequency[str]++;
+                    frequency[token]++;
             }
 
             if (frequency.Count == 0)
@@ -790,18 +920,43 @@ namespace XAU.ViewModels.Pages
             return frequency.OrderByDescending(p => p.Value).First().Key;
         }
 
-        private string FindFallbackEventsToken(IEnumerable<long> addresses)
+        private static string Truncate(string s, int max)
+        {
+            if (s == null) return "(null)";
+            return s.Length <= max ? s : s.Substring(0, max) + "...";
+        }
+
+        /// <summary>
+        /// Extracts the user hash from "XBL3.0 x={hash};{jwt}" or "x:XBL3.0 x={hash};{jwt}"
+        /// </summary>
+        private static string ExtractUserHash(string token)
+        {
+            int xEq = token.IndexOf("x=");
+            if (xEq < 0) return null;
+            int semi = token.IndexOf(';', xEq);
+            if (semi < 0) return null;
+            return token.Substring(xEq + 2, semi - (xEq + 2));
+        }
+
+        private string FindFallbackEventsToken(IEnumerable<long> addresses, Encoding encoding)
         {
             var frequency = new Dictionary<string, int>();
             foreach (var address in addresses)
             {
-                string str = eventsMem.ReadString(address.ToString("X"), length: 10000);
-                if (string.IsNullOrEmpty(str) || !str.StartsWith("XBL3.0") || str.Length < 20)
+                string raw = eventsMem.ReadString(address.ToString("X"), length: 10000, stringEncoding: encoding);
+                if (string.IsNullOrEmpty(raw) || !raw.StartsWith("XBL3.0"))
                     continue;
 
-                // Skip the exact XAuth token — we want a different token (events)
-                if (str == XAUTH)
+                // Trim at first double-quote (tickets header format: "key"="XBL3.0 x=...jwt";"next")
+                string str = raw;
+                int quoteIdx = str.IndexOf('"');
+                if (quoteIdx > 0)
+                    str = str.Substring(0, quoteIdx);
+
+                if (str.Length < 20)
                     continue;
+
+                EventsLog($"Fallback token: hash={ExtractUserHash(str)}, len={str.Length}, first60={Truncate(str, 60)}");
 
                 if (!frequency.ContainsKey(str))
                     frequency[str] = 1;
@@ -812,8 +967,31 @@ namespace XAU.ViewModels.Pages
             if (frequency.Count == 0)
                 return null;
 
-            // Most frequent remaining token should be the events token
-            return frequency.OrderByDescending(p => p.Value).First().Key;
+            // If we know the events user hash (from OAuth), use it to pick the right token
+            if (!string.IsNullOrEmpty(_eventsUserHash))
+            {
+                var match = frequency.Keys
+                    .Where(t => ExtractUserHash(t) == _eventsUserHash)
+                    .OrderByDescending(t => frequency[t])
+                    .FirstOrDefault();
+                if (match != null)
+                {
+                    EventsLog($"Matched token by events user hash ({_eventsUserHash})");
+                    return match;
+                }
+                EventsLog($"No token matched events user hash ({_eventsUserHash}), falling back to heuristic");
+            }
+
+            // Fallback: exclude the XAuth token and pick the most frequent remaining
+            var candidates = frequency
+                .Where(p => p.Key != XAUTH)
+                .OrderByDescending(p => p.Value)
+                .ToList();
+
+            if (candidates.Count == 0)
+                return null;
+
+            return candidates.First().Key;
         }
 
         /// <summary>
@@ -981,22 +1159,23 @@ namespace XAU.ViewModels.Pages
             {
                 _snackbarService.Show("Error", "Failed to generate XAUTH", ControlAppearance.Danger, new SymbolIcon(SymbolRegular.ErrorCircle24), _snackbarDuration);
             }
-            deviceToken = await xboxSignedClient.RequestDeviceToken(XboxDeviceTypes.Win32, "0.0.0");
-            sisuResult = await xboxSignedClient.SisuAuth(new XboxSisuAuthRequest
-            {
-                AccessToken = response.AccessToken,
-                ClientId = XboxGameTitles.XboxAppPC,
-                DeviceToken = deviceToken.Token,
-                RelyingParty = XboxAuthConstants.XboxEventsRelyingParty,
-            });
             try
             {
-                AchievementsViewModel.EventsToken = $"x:XBL3.0 x={sisuResult.AuthorizationToken.XuiClaims.UserHash};{sisuResult.AuthorizationToken.Token}";
-                _eventsTokenObtainedAt = DateTime.UtcNow;
-                PersistEventsToken();
+                // Use SISU with a real game's MSA App ID for the events RP.
+                // Using Solitaire's App ID so the token is title-scoped to a real game.
+                var eventsToken = await RequestEventsTokenViaSisu(response.AccessToken, deviceToken.Token, XboxGameTitles.Solitaire);
+                if (eventsToken != null)
+                {
+                    _eventsUserHash = eventsToken.XuiClaims?.UserHash;
+                    AchievementsViewModel.EventsToken = $"x:XBL3.0 x={_eventsUserHash};{eventsToken.Token}";
+                    _eventsTokenObtainedAt = DateTime.UtcNow;
+                    PersistEventsToken();
+                    EventsLog($"SISU events token obtained: hash={_eventsUserHash}");
+                }
             }
-            catch
+            catch (Exception ex)
             {
+                EventsLog($"SISU events token failed: {ex.Message}");
                 _snackbarService.Show("Error", "Failed to generate Events Token", ControlAppearance.Danger, new SymbolIcon(SymbolRegular.ErrorCircle24), _snackbarDuration);
             }
             LoginText = "Logout";
@@ -1033,6 +1212,7 @@ namespace XAU.ViewModels.Pages
             Watermarks.Clear();
             AchievementsViewModel.EventsToken = null;
             _eventsTokenObtainedAt = DateTime.MinValue;
+            _eventsUserHash = null;
             XauthWorker_ProgressChanged(null, null);
         }
 
@@ -1223,6 +1403,8 @@ namespace XAU.ViewModels.Pages
             Settings.AutoGrabEventsToken = settings.AutoGrabEventsToken;
             Settings.CachedEventsToken = settings.CachedEventsToken;
             Settings.EventsTokenObtainedAt = settings.EventsTokenObtainedAt;
+            Settings.EventsUserHash = settings.EventsUserHash;
+            _eventsUserHash = settings.EventsUserHash;
 
             // Restore cached events token if it's still fresh
             if (!string.IsNullOrEmpty(settings.CachedEventsToken) && settings.EventsTokenObtainedAt.HasValue)

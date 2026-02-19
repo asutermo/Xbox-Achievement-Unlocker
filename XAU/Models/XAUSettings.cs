@@ -14,4 +14,5 @@ public class XAUSettings
     public bool AutoGrabEventsToken { get; set; }
     public string? CachedEventsToken { get; set; }
     public DateTime? EventsTokenObtainedAt { get; set; }
+    public string? EventsUserHash { get; set; }
 }

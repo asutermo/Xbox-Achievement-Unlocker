@@ -100,7 +100,7 @@ namespace XAU.Views.Pages
 
             _snackbarService.Show(
                 "Scanning...",
-                "Launching Solitaire and scanning for events token. This may take up to a minute.",
+                "Launching Solitaire and scanning for events token. This may take up to 2-3 minutes while waiting for events to fire.",
                 ControlAppearance.Info,
                 new SymbolIcon(SymbolRegular.Search24)
             );
@@ -108,11 +108,11 @@ namespace XAU.Views.Pages
             GrabEventsTokenButton.IsEnabled = false;
             _homeViewModel.ScanForEventsTokenManual();
 
-            // Poll for the result - the worker may take up to ~60s
-            // (process launch + Xbox Live init + scan retries)
+            // Poll for the result - the scan can take up to ~2.5 minutes
+            // (process launch + 20s Xbox Live init + 18 scan retries × 7s)
             System.Threading.Tasks.Task.Run(async () =>
             {
-                for (int i = 0; i < 65; i++)
+                for (int i = 0; i < 170; i++)
                 {
                     await System.Threading.Tasks.Task.Delay(1000);
                     if (!string.IsNullOrEmpty(AchievementsViewModel.EventsToken))
@@ -138,7 +138,7 @@ namespace XAU.Views.Pages
                     GrabEventsTokenButton.IsEnabled = true;
                     _snackbarService.Show(
                         "Events Token Not Found",
-                        "Could not find events token. Make sure Solitaire is installed.",
+                        "Could not find events token. Try playing a quick game of Solitaire first, then retry.",
                         ControlAppearance.Caution,
                         new SymbolIcon(SymbolRegular.Warning24)
                     );
