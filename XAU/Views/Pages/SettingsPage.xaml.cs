@@ -72,11 +72,13 @@ namespace XAU.Views.Pages
             if (string.IsNullOrWhiteSpace(EventsTokenBox.Text))
             {
                 AchievementsViewModel.EventsToken = null;
+                _homeViewModel.PersistEventsToken();
                 UpdateEventsTokenStatus();
                 return;
             }
 
             AchievementsViewModel.EventsToken = EventsTokenBox.Text;
+            _homeViewModel.PersistEventsToken();
             UpdateEventsTokenStatus();
         }
 
