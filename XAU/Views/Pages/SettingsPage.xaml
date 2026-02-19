@@ -279,7 +279,7 @@
                 </Grid>
             </ui:CardControl.Header>
             <StackPanel Orientation="Horizontal">
-                <ui:TextBox x:Name="EventsTokenBox" TextChanged="EventsToken_OnTextChanged" />
+                <ui:TextBox x:Name="EventsTokenBox" MaxLines="1" VerticalAlignment="Center" TextChanged="EventsToken_OnTextChanged" />
                 <ui:Button x:Name="GrabEventsTokenButton" Content="Grab from Game" Margin="8,0,0,0" Click="GrabEventsToken_OnClick" />
             </StackPanel>
         </ui:CardControl>

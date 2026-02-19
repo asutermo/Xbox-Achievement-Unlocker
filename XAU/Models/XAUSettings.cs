@@ -12,4 +12,6 @@ public class XAUSettings
     public bool PrivacyMode { get; set; }
     public bool OAuthLogin { get; set; }
     public bool AutoGrabEventsToken { get; set; }
+    public string? CachedEventsToken { get; set; }
+    public DateTime? EventsTokenObtainedAt { get; set; }
 }

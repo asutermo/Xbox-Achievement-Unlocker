@@ -531,8 +531,8 @@ namespace XAU.ViewModels.Pages
         #region EventsToken
         private bool solitaireLaunchedByUs = false;
 
-        // How often the worker loop checks (keep short so it responds to cleared tokens quickly)
-        private static readonly TimeSpan EventsTokenCheckInterval = TimeSpan.FromMinutes(1);
+        // How often the worker loop checks
+        private static readonly TimeSpan EventsTokenCheckInterval = TimeSpan.FromMinutes(10);
         // How old a token can be before we proactively refresh it (~24h XSTS expiry, refresh early)
         private static readonly TimeSpan EventsTokenMaxAge = TimeSpan.FromHours(23);
 
@@ -546,7 +546,31 @@ namespace XAU.ViewModels.Pages
             catch { }
         }
 
+        private void PersistEventsToken()
+        {
+            try
+            {
+                Settings.CachedEventsToken = AchievementsViewModel.EventsToken;
+                Settings.EventsTokenObtainedAt = _eventsTokenObtainedAt;
+                var json = JsonConvert.SerializeObject(Settings);
+                File.WriteAllText(SettingsFilePath, json);
+            }
+            catch { }
+        }
+
         public void EventsTokenWorker_DoWork(object sender, DoWorkEventArgs e)
+        {
+            try
+            {
+                EventsTokenWorkerLoop();
+            }
+            catch (Exception ex)
+            {
+                EventsLog($"Worker crashed: {ex.Message}");
+            }
+        }
+
+        private void EventsTokenWorkerLoop()
         {
             EventsLog("Worker started");
             // Wait for login before scanning
@@ -556,7 +580,7 @@ namespace XAU.ViewModels.Pages
             }
             EventsLog("Logged in, entering refresh loop");
 
-            // If a token already exists (e.g. from OAuth), mark it as fresh
+            // If a token already exists (e.g. from OAuth or cache), mark it as fresh
             if (!string.IsNullOrEmpty(AchievementsViewModel.EventsToken) && _eventsTokenObtainedAt == DateTime.MinValue)
                 _eventsTokenObtainedAt = DateTime.UtcNow;
 
@@ -591,7 +615,8 @@ namespace XAU.ViewModels.Pages
                     if (!string.IsNullOrEmpty(AchievementsViewModel.EventsToken))
                     {
                         _eventsTokenObtainedAt = DateTime.UtcNow;
-                        EventsLog("Grab complete. Fresh token obtained.");
+                        PersistEventsToken();
+                        EventsLog("Grab complete. Fresh token obtained and saved.");
                     }
                     else
                     {
@@ -962,6 +987,7 @@ namespace XAU.ViewModels.Pages
             {
                 AchievementsViewModel.EventsToken = $"x:XBL3.0 x={sisuResult.AuthorizationToken.XuiClaims.UserHash};{sisuResult.AuthorizationToken.Token}";
                 _eventsTokenObtainedAt = DateTime.UtcNow;
+                PersistEventsToken();
             }
             catch
             {
@@ -1187,6 +1213,24 @@ namespace XAU.ViewModels.Pages
             Settings.PrivacyMode = settings.PrivacyMode;
             Settings.OAuthLogin = settings.OAuthLogin;
             Settings.AutoGrabEventsToken = settings.AutoGrabEventsToken;
+            Settings.CachedEventsToken = settings.CachedEventsToken;
+            Settings.EventsTokenObtainedAt = settings.EventsTokenObtainedAt;
+
+            // Restore cached events token if it's still fresh
+            if (!string.IsNullOrEmpty(settings.CachedEventsToken) && settings.EventsTokenObtainedAt.HasValue)
+            {
+                var age = DateTime.UtcNow - settings.EventsTokenObtainedAt.Value;
+                if (age < EventsTokenMaxAge)
+                {
+                    AchievementsViewModel.EventsToken = settings.CachedEventsToken;
+                    _eventsTokenObtainedAt = settings.EventsTokenObtainedAt.Value;
+                    EventsLog($"Restored cached events token (age: {age.TotalHours:F1}h)");
+                }
+                else
+                {
+                    EventsLog($"Cached events token expired (age: {age.TotalHours:F1}h), will re-grab");
+                }
+            }
         }
 
         #endregion
