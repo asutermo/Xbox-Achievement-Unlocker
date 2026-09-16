@@ -77,6 +77,15 @@ namespace XAU.ViewModels.Pages
         public static string XAUTH = "";
         public static string XUIDOnly = "";
         public static bool InitComplete = false;
+
+        // Cadence/anti-thrash state for the memory-scan token grabber. While we already hold a
+        // (possibly expired) token we don't re-scan the whole user address space on every ~1s poll
+        // tick -- only often enough to notice the Xbox app refreshing to a NEW token. See
+        // ShouldScanForXauth / ShouldAdoptScannedToken.
+        private static readonly TimeSpan XauthScanInterval = TimeSpan.FromSeconds(5);
+        private static DateTime _lastXauthScanUtc = DateTime.MinValue;
+        private bool _xauthScanInFlight = false;
+
         private bool _isInitialized = false;
         private bool _isInitializing = false;
         string SettingsFilePath = Path.Combine(Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.MyDocuments), "XAU"), "settings.json");
