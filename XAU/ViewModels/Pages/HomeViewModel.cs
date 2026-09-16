@@ -109,6 +109,15 @@ namespace XAU.ViewModels.Pages
         private static DateTime _lastXauthScanUtc = DateTime.MinValue;
         private bool _xauthScanInFlight = false;
 
+        // Re-test cadence, deliberately separate from adoption. Because we only adopt a CHANGED token
+        // (ShouldAdoptScannedToken), a token whose first TestXAUTH transiently failed/401'd would never be
+        // re-tested if the test were gated purely off XAUTHTested -- the old spammy code only self-healed
+        // by re-adopting the same token every tick. So give the test its own bounded re-arm clock plus an
+        // in-flight lock: at most one attempt per XauthScanInterval, no overlap, and it keeps retrying the
+        // token we hold so a token that merely wasn't ready yet (fresh launch) still logs in.
+        private static DateTime _lastXauthTestUtc = DateTime.MinValue;
+        private bool _xauthTestInFlight = false;
+
         private bool _isInitialized = false;
         private bool _isInitializing = false;
         string SettingsFilePath = Path.Combine(Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.MyDocuments), "XAU"), "settings.json");
@@ -500,8 +509,15 @@ namespace XAU.ViewModels.Pages
                     }
                     LoggedIn = "Not Logged In";
                     LoggedInColor = new SolidColorBrush(Colors.Red);
-                    if (!XAUTHTested && XAUTH.Length > 0)
+
+                    // Test on its own bounded cadence rather than keying off XAUTHTested. Keep retrying the
+                    // token we hold so a transient 401 / not-yet-ready token still logs the user in, instead
+                    // of one failed attempt latching us out until a genuinely different token shows up.
+                    if (XAUTH.Length > 0 &&
+                        ShouldTestXauth(_xauthTestInFlight, _lastXauthTestUtc, DateTime.UtcNow, XauthScanInterval))
                     {
+                        _xauthTestInFlight = true;
+                        _lastXauthTestUtc = DateTime.UtcNow;
                         TestXAUTH();
                     }
                 }
@@ -548,6 +564,22 @@ namespace XAU.ViewModels.Pages
             return scanned != current;
         }
 
+        /// <summary>
+        /// True when a TestXAUTH attempt may run: never overlapping (inFlight) and at most one per
+        /// <paramref name="interval"/>. Deliberately does NOT consult XAUTHTested -- a token that 401'd once
+        /// must still be retried, because it can become valid (Xbox app still authenticating after launch)
+        /// or the failure may have been transient. Keying the retry off XAUTHTested as a permanent latch was
+        /// what caused "not logging in on a fresh launch."
+        /// </summary>
+        public static bool ShouldTestXauth(bool inFlight, DateTime lastTestUtc, DateTime nowUtc, TimeSpan interval)
+        {
+            if (inFlight)
+                return false;
+            if (lastTestUtc == DateTime.MinValue)
+                return true;
+            return (nowUtc - lastTestUtc) >= interval;
+        }
+
         private async void GetXAUTH()
         {
             if (!ShouldScanForXauth(_lastXauthScanUtc, DateTime.UtcNow, _xauthScanInFlight))
@@ -584,6 +616,7 @@ namespace XAU.ViewModels.Pages
 
                 if (XauthStrings.Length == 0)
                 {
+                    Debug.WriteLine("[XAUTHDBG] scan found no XBL3.0 token candidates in Xbox app memory (signed in there yet?)");
                     return;
                 }
 
@@ -598,11 +631,18 @@ namespace XAU.ViewModels.Pages
                     }
                 }
 
-                if (ShouldAdoptScannedToken(mostCommon, XAUTH, highestFrequency))
+                bool adoptedNew = ShouldAdoptScannedToken(mostCommon, XAUTH, highestFrequency);
+                if (adoptedNew)
                 {
                     XAUTH = mostCommon;
                     XAUTHTested = false;
                 }
+
+                // topFreq needs >3 to adopt: right after the Xbox app (re)launches the token can sit at a
+                // low duplicate count and be skipped as "below confidence" -- this line makes that visible.
+                Debug.WriteLine(
+                    $"[XAUTHDBG] scan: candidates={XauthStrings.Length}, distinct={frequency.Count}, " +
+                    $"topFreq={highestFrequency} (need >3), currentXAUThLen={XAUTH.Length}, adoptedNew={adoptedNew}");
             }
             finally
             {
@@ -611,6 +651,7 @@ namespace XAU.ViewModels.Pages
         }
         private async void TestXAUTH()
         {
+            Debug.WriteLine($"[XAUTHDBG] TestXAUTH: verifying token (len={XAUTH.Length}) via GetBasicProfileAsync...");
             try
             {
                 var response = await _xboxRestAPI.Value.GetBasicProfileAsync();
@@ -630,6 +671,8 @@ namespace XAU.ViewModels.Pages
                 XAUTHTested = true;
                 InitComplete = true;
 
+                Debug.WriteLine($"[XAUTHDBG] TestXAUTH: SUCCESS (XUID={XUIDOnly}) -- logged in; memory scan halts.");
+
                 // Start the events token worker to periodically check/refresh the token
                 StartWorker(EventsTokenWorker);
             }
@@ -639,11 +682,24 @@ namespace XAU.ViewModels.Pages
                 {
                     IsLoggedIn = false;
                     XAUTHTested = true;
-
+                    Debug.WriteLine("[XAUTHDBG] TestXAUTH: 401 Unauthorized -- token held in Xbox app memory is stale/expired; " +
+                        "re-testing until the Xbox app yields a fresh one (re-launch / re-sign-in to the Xbox app to refresh it).");
+                }
+                else
+                {
+                    // Previously this non-401 case fell through silently and left the app stuck signed-out
+                    // with no clue; surface the real status code.
+                    Debug.WriteLine($"[XAUTHDBG] TestXAUTH: HttpRequestException {(int)ex.StatusCode} {ex.StatusCode} (not 401) -- staying signed-out, will retry.");
                 }
             }
-            catch (Exception)
+            catch (Exception ex)
             {
+                Debug.WriteLine($"[XAUTHDBG] TestXAUTH: threw {ex.GetType().Name}: {ex.Message} (swallowed; will retry on next cadence).");
+            }
+            finally
+            {
+                // Release the re-test lock so the next bounded attempt can run.
+                _xauthTestInFlight = false;
             }
         }
         #endregion
@@ -1039,12 +1095,12 @@ namespace XAU.ViewModels.Pages
             XAUTHTested = false;
             InitComplete = false;
 
+            // Reset scan + test clocks so a cleared cache re-scans and re-tests immediately.
+            _lastXauthScanUtc = DateTime.MinValue;
+            _lastXauthTestUtc = DateTime.MinValue;
+
             // Reset manual xauth flag so auto-scan can resume
             SettingsViewModel.ManualXauth = false;
-
-            // Forget scan cadence so the next tick does a fresh AoBScan immediately rather than
-            // waiting out the XauthScanInterval back-off from the pre-clear scan.
-            _lastXauthScanUtc = DateTime.MinValue;
 
             // Clear events token from memory
             AchievementsViewModel.EventsToken = null;

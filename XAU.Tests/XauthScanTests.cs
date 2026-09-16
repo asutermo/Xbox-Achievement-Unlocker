@@ -170,4 +170,100 @@ public class XauthScanTests
     }
 
     #endregion
+
+    #region Re-test cadence (regression: "not logging in on fresh launch")
+
+    [Theory]
+    [InlineData(true, false)]   // in flight -> no
+    [InlineData(false, true)]   // never tested -> yes
+    public void ShouldTestXauth_InFlightAndFirstAttempt(bool inFlight, bool expected)
+    {
+        Assert.Equal(expected, HomeViewModel.ShouldTestXauth(
+            inFlight, DateTime.MinValue, DateTime.UtcNow, TimeSpan.FromSeconds(5)));
+    }
+
+    [Fact]
+    public void ShouldTestXauth_Blocked_BeforeIntervalElapsed()
+    {
+        var now = DateTime.UtcNow;
+        var last = now - TimeSpan.FromSeconds(1);
+        Assert.False(HomeViewModel.ShouldTestXauth(false, last, now, TimeSpan.FromSeconds(5)));
+    }
+
+    [Fact]
+    public void ShouldTestXauth_Allowed_AfterIntervalElapsed()
+    {
+        var now = DateTime.UtcNow;
+        var last = now - TimeSpan.FromSeconds(5);
+        Assert.True(HomeViewModel.ShouldTestXauth(false, last, now, TimeSpan.FromSeconds(5)));
+    }
+
+    [Fact]
+    public void TransientFirstTestFailure_StillLogsInOnceTokenIsReady_UnchangedToken()
+    {
+        // Reproduces the reported "not logging in on fresh launch": the held token does NOT change, so
+        // adoption never re-arms; the gate must therefore be re-test cadence (not XAUTHTested) so that a
+        // token that simply wasn't ready on the first attempt still logs in on a later bounded attempt.
+        const string token = "XBL3.0 x=1234567890;tok"; // present from the start, becomes valid at t=6s
+
+        string xauth = token;
+        bool loggedIn = false;
+        var start = new DateTime(2025, 1, 1, 0, 0, 0, DateTimeKind.Utc);
+        var interval = TimeSpan.FromSeconds(5);
+        var lastTest = DateTime.MinValue;
+        bool inFlight = false;
+        int attempts = 0;
+
+        for (int t = 0; t <= 10; t++)
+        {
+            var now = start + TimeSpan.FromSeconds(t);
+            if (xauth.Length > 0 && HomeViewModel.ShouldTestXauth(inFlight, lastTest, now, interval))
+            {
+                inFlight = true;
+                lastTest = now;
+                attempts++;
+
+                // The API only accepts the token from the 2nd bounded attempt onward (transient "not ready
+                // yet" on the very first attempt right after launch).
+                loggedIn = t >= 5;
+                inFlight = false;
+            }
+
+            if (loggedIn)
+                break;
+        }
+
+        Assert.True(loggedIn);
+        Assert.Equal(2, attempts); // one failed attempt at t=0, one success at t=5 (bounded, not once-per-tick)
+    }
+
+    [Fact]
+    public void HeldButAlwaysInvalidToken_IsTestedAtBoundedRate_NotOncePerTick()
+    {
+        // A genuinely dead token must still be re-tested (so recovery works when it becomes valid) but at
+        // the bounded cadence, NOT every tick -- guarding against re-introducing the 1 Hz API hammering.
+        string xauth = "XBL3.0 x=1234567890;dead";
+        var start = new DateTime(2025, 1, 1, 0, 0, 0, DateTimeKind.Utc);
+        var interval = TimeSpan.FromSeconds(5);
+        var lastTest = DateTime.MinValue;
+        bool inFlight = false;
+        int attempts = 0;
+
+        for (int t = 0; t < 60; t++) // 60 one-second ticks
+        {
+            var now = start + TimeSpan.FromSeconds(t);
+            if (xauth.Length > 0 && HomeViewModel.ShouldTestXauth(inFlight, lastTest, now, interval))
+            {
+                inFlight = true;
+                lastTest = now;
+                attempts++;
+                inFlight = false; // test fails (still not logged in)
+            }
+        }
+
+        // ~one per 5s over 60s -> ~12 attempts, definitively far fewer than 60 (no per-tick hammering).
+        Assert.InRange(attempts, 10, 13);
+    }
+
+    #endregion
 }
