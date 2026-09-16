@@ -200,5 +200,20 @@ namespace XAU.Views.Pages
         {
             EventsTokenBox.MaxWidth = e.NewSize.Width / 3;
         }
+
+        private void ClearAuthCacheButton_OnClick(object sender, RoutedEventArgs e)
+        {
+            _homeViewModel.ClearAuthCache();
+
+            // Reset UI fields that display cached auth state
+            XauthTextBox.Text = string.Empty;
+            SyncEventsTokenUI();
+
+            _snackbarService.Show(
+                "Auth Cache Cleared",
+                "All tokens have been deleted. Log in again from the Home page.",
+                ControlAppearance.Success,
+                new SymbolIcon(SymbolRegular.Checkmark24));
+        }
     }
 }

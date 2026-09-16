@@ -86,7 +86,13 @@ namespace XAU.ViewModels.Pages
                 GameImage = "pack://application:,,,/Assets/cirno.png";
                 GameTime = "Time Played: ";
                 HomeViewModel.SpoofingStatus = 0;
-                await _xboxRestAPI.Value.StopHeartbeatAsync(HomeViewModel.XUIDOnly);
+                try
+                {
+                    await _xboxRestAPI.Value.StopHeartbeatAsync(HomeViewModel.XUIDOnly);
+                }
+                catch (Exception)
+                {
+                }
                 return;
             }
             HomeViewModel.SpoofedTitleID = NewSpoofingID;
@@ -103,8 +109,19 @@ namespace XAU.ViewModels.Pages
         public async void SpoofGame()
         {
             CurrentSpoofingID = NewSpoofingID;
-            GameInfoResponse = await _xboxRestAPI.Value.GetGameTitleAsync(HomeViewModel.XUIDOnly, NewSpoofingID);
-            GameStatsResponse = await _xboxRestAPI.Value.GetGameStatsAsync(HomeViewModel.XUIDOnly, NewSpoofingID);
+            try
+            {
+                GameInfoResponse = await _xboxRestAPI.Value.GetGameTitleAsync(HomeViewModel.XUIDOnly, NewSpoofingID);
+                GameStatsResponse = await _xboxRestAPI.Value.GetGameStatsAsync(HomeViewModel.XUIDOnly, NewSpoofingID);
+            }
+            catch (Exception ex)
+            {
+                _snackbarService.Show("Error: Unable to acquire game info or stats",
+                    $"The request failed: {ex.Message}",
+                    ControlAppearance.Danger,
+                    new SymbolIcon(SymbolRegular.ErrorCircle24), _snackbarDuration);
+                return;
+            }
 
             if (GameInfoResponse == null || GameStatsResponse == null || !GameInfoResponse.Titles.Any())
             {
@@ -169,7 +186,7 @@ namespace XAU.ViewModels.Pages
             stopwatch.Start();
             TimeSpan spoofingTime = stopwatch.Elapsed;
             SpoofingText = $"Spoofing {GameName} For: {spoofingTime.ToString(@"hh\:mm\:ss")}";
-            await _xboxRestAPI.Value.SendHeartbeatAsync(HomeViewModel.XUIDOnly, CurrentSpoofingID);
+            await TrySendHeartbeat();
             var i = 0;
             Thread.Sleep(1000);
             SpoofingUpdate = false;
@@ -177,7 +194,7 @@ namespace XAU.ViewModels.Pages
             {
                 if (i == 300)
                 {
-                    await _xboxRestAPI.Value.SendHeartbeatAsync(HomeViewModel.XUIDOnly, CurrentSpoofingID);
+                    await TrySendHeartbeat();
                     i = 0;
                 }
                 else
@@ -189,10 +206,21 @@ namespace XAU.ViewModels.Pages
                         break;
                     }
                     spoofingTime = stopwatch.Elapsed;
-                    SpoofingText = $"Spoofing {GameInfoResponse.Titles[0].Name} For: {spoofingTime.ToString(@"hh\:mm\:ss")}";
+                    SpoofingText = $"Spoofing {GameInfoResponse?.Titles?.FirstOrDefault()?.Name ?? CurrentSpoofingID} For: {spoofingTime.ToString(@"hh\:mm\:ss")}";
                     i++;
                 }
                 Thread.Sleep(1000);
+            }
+        }
+
+        private async Task TrySendHeartbeat()
+        {
+            try
+            {
+                await _xboxRestAPI.Value.SendHeartbeatAsync(HomeViewModel.XUIDOnly, CurrentSpoofingID);
+            }
+            catch (Exception)
+            {
             }
         }
 
@@ -339,7 +367,16 @@ namespace XAU.ViewModels.Pages
                 return;
             }
 
-            var profileData = await _xboxRestAPI.Value.GetGamertagProfileAsync(Gamertag) ?? new JObject();
+            JObject profileData;
+            try
+            {
+                profileData = await _xboxRestAPI.Value.GetGamertagProfileAsync(Gamertag) ?? new JObject();
+            }
+            catch (Exception)
+            {
+                _snackbarService.Show("Error", "Failed to fetch gamertag information.", ControlAppearance.Danger, new SymbolIcon(SymbolRegular.ErrorCircle24), _snackbarDuration);
+                return;
+            }
             var profileUsers = profileData["profileUsers"]?.FirstOrDefault();
             if (profileUsers == null)
             {
