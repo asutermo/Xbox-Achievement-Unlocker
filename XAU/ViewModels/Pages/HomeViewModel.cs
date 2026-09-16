@@ -78,6 +78,7 @@ namespace XAU.ViewModels.Pages
         public static string XUIDOnly = "";
         public static bool InitComplete = false;
         private bool _isInitialized = false;
+        private bool _isInitializing = false;
         string SettingsFilePath = Path.Combine(Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.MyDocuments), "XAU"), "settings.json");
         string EventsMetaFilePath = Path.Combine(Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.MyDocuments), "XAU"), "Events", "meta.json");
 
@@ -86,10 +87,53 @@ namespace XAU.ViewModels.Pages
 
         public async void OnNavigatedTo()
         {
-            if (!_isInitialized)
+            // InitializeViewModel awaits network calls (update checks) before it flips
+            // _isInitialized, so a quick navigate-away-and-back could re-enter it and call
+            // XauthWorker.RunWorkerAsync() a second time -> "BackgroundWorker is currently
+            // busy". Gate on an in-progress flag as well, not just the completed flag.
+            if (!ShouldBeginInitialization(_isInitialized, _isInitializing))
+                return;
+
+            _isInitializing = true;
+            try
+            {
                 await InitializeViewModel();
+            }
+            finally
+            {
+                _isInitializing = false;
+            }
         }
         public void OnNavigatedFrom() { }
+
+        /// <summary>
+        /// True only when InitializeViewModel should run: it has neither completed nor is
+        /// already in progress. Prevents re-entrant navigation from double-running init
+        /// (which used to double-start the BackgroundWorkers and crash).
+        /// </summary>
+        public static bool ShouldBeginInitialization(bool initialized, bool initializing)
+            => !initialized && !initializing;
+
+        /// <summary>
+        /// True when a BackgroundWorker may be (re)started. Starting an already-busy worker
+        /// throws InvalidOperationException; this guard (plus the catch in StartWorker) keeps
+        /// the "currently busy" crash from reaching the unhandled-exception dialog.
+        /// </summary>
+        public static bool ShouldStartWorker(bool isBusy) => !isBusy;
+
+        private void StartWorker(BackgroundWorker worker)
+        {
+            if (!ShouldStartWorker(worker.IsBusy))
+                return;
+            try
+            {
+                worker.RunWorkerAsync();
+            }
+            catch (InvalidOperationException)
+            {
+                // Worker was started on another thread between the IsBusy check and the call.
+            }
+        }
 
         #region Update
         private async void CheckForToolUpdates()
