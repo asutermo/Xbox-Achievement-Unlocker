@@ -35,13 +35,14 @@ namespace XAU.ViewModels.Pages
         private Dictionary<int, DGAchievement> _unlockedAchievements = new Dictionary<int, DGAchievement>();
 
         private GameTitle GameInfoResponse = new GameTitle();
+        private string SpoofedGameName => GameInfoResponse?.Titles?.FirstOrDefault()?.Name ?? GameName;
         // TODO: this needs to be updated if language changes
         private Lazy<XboxRestAPI> _xboxRestAPI = new Lazy<XboxRestAPI>(() => new XboxRestAPI(HomeViewModel.XAUTH));
 
         public static bool SpoofingUpdate = false;
         private bool IsEventBased = false;
         private dynamic EventsData = (dynamic)(new JObject());
-        public static string EventsToken;
+        public static string? EventsToken;
 
         public AchievementsViewModel(ISnackbarService snackbarService, IContentDialogService contentDialogService, INavigationService navigationService)
         {
@@ -81,17 +82,17 @@ namespace XAU.ViewModels.Pages
                 }
                 else
                 {
-                    if (HomeViewModel.SpoofingStatus == 1 && !!string.IsNullOrWhiteSpace(GameInfo))
+                    if (HomeViewModel.SpoofingStatus == 1 && string.IsNullOrWhiteSpace(GameInfo))
                     {
                         if (HomeViewModel.SpoofedTitleID == TitleIDOverride)
                         {
                             GameInfo = "Manually Spoofing";
-                            GameName = GameInfoResponse.Titles[0].Name;
+                            GameName = SpoofedGameName;
                         }
                         else
                         {
                             GameInfo = "Spoofing Another Game";
-                            GameName = GameInfoResponse.Titles[0].Name;
+                            GameName = SpoofedGameName;
                         }
 
                     }
@@ -119,15 +120,26 @@ namespace XAU.ViewModels.Pages
 
         private async void InitializeViewModel()
         {
-            if (IsSelectedGame360)
-                Unlockable = false;
-            await LoadGameInfo();
-            await LoadAchievements();
-            if (HomeViewModel.Settings.AutoSpooferEnabled)
-                SpoofGame();
-            TitleIDEnabled = true;
-            IsInitialized = true;
-            NewGame = false;
+            try
+            {
+                if (IsSelectedGame360)
+                    Unlockable = false;
+                await LoadGameInfo();
+                await LoadAchievements();
+                if (HomeViewModel.Settings.AutoSpooferEnabled)
+                    SpoofGame();
+                IsInitialized = true;
+                NewGame = false;
+            }
+            catch (Exception ex)
+            {
+                _snackbarService.Show("Error", $"Failed to load game data: {ex.Message}", ControlAppearance.Danger,
+                    new SymbolIcon(SymbolRegular.ErrorCircle24), _snackbarDuration);
+            }
+            finally
+            {
+                TitleIDEnabled = true;
+            }
         }
 
 
@@ -144,6 +156,7 @@ namespace XAU.ViewModels.Pages
 
             // Fetch game information
             var gameInfoResponse = await _xboxRestAPI.Value.GetGameTitleAsync(HomeViewModel.XUIDOnly, TitleIDOverride);
+            GameInfoResponse = gameInfoResponse ?? new GameTitle();
 
             // Handle response validation and set properties accordingly
             if (gameInfoResponse?.Titles?.Any() != true)
@@ -169,12 +182,12 @@ namespace XAU.ViewModels.Pages
                 if (HomeViewModel.SpoofedTitleID == TitleIDOverride)
                 {
                     GameInfo = "Manually Spoofing";
-                    GameName = GameInfoResponse.Titles[0].Name;
+                    GameName = SpoofedGameName;
                 }
                 else
                 {
                     GameInfo = "Spoofing Another Game";
-                    GameName = GameInfoResponse.Titles[0].Name;
+                    GameName = SpoofedGameName;
                 }
             }
             else
@@ -184,7 +197,7 @@ namespace XAU.ViewModels.Pages
                 GameInfo = "Auto Spoofing";
                 if (GameInfoResponse.Titles.Any())
                 {
-                    GameName = GameInfoResponse.Titles[0].Name;
+                    GameName = SpoofedGameName;
                 }
 
                 await Task.Run(() => Spoofing());
@@ -193,12 +206,12 @@ namespace XAU.ViewModels.Pages
                     if (HomeViewModel.SpoofedTitleID == HomeViewModel.AutoSpoofedTitleID)
                     {
                         GameInfo = "Manually Spoofing";
-                        GameName = GameInfoResponse.Titles[0].Name;
+                        GameName = SpoofedGameName;
                     }
                     else
                     {
                         GameInfo = "Spoofing Another Game";
-                        GameName = GameInfoResponse.Titles[0].Name;
+                        GameName = SpoofedGameName;
                     }
                 }
                 HomeViewModel.AutoSpoofedTitleID = "0";
@@ -209,13 +222,24 @@ namespace XAU.ViewModels.Pages
 
         public async Task Spoofing()
         {
-            await _xboxRestAPI.Value.SendHeartbeatAsync(HomeViewModel.XUIDOnly, HomeViewModel.AutoSpoofedTitleID);
+            await TrySendHeartbeat();
             SpoofingUpdate = false;
             while (!SpoofingUpdate)
             {
                 await Task.Delay(TimeSpan.FromSeconds(300));
                 if (SpoofingUpdate) break;
+                await TrySendHeartbeat();
+            }
+        }
+
+        private async Task TrySendHeartbeat()
+        {
+            try
+            {
                 await _xboxRestAPI.Value.SendHeartbeatAsync(HomeViewModel.XUIDOnly, HomeViewModel.AutoSpoofedTitleID);
+            }
+            catch (Exception)
+            {
             }
         }
 

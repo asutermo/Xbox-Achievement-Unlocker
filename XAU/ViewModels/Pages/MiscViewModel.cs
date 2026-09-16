@@ -86,7 +86,13 @@ namespace XAU.ViewModels.Pages
                 GameImage = "pack://application:,,,/Assets/cirno.png";
                 GameTime = "Time Played: ";
                 HomeViewModel.SpoofingStatus = 0;
-                await _xboxRestAPI.Value.StopHeartbeatAsync(HomeViewModel.XUIDOnly);
+                try
+                {
+                    await _xboxRestAPI.Value.StopHeartbeatAsync(HomeViewModel.XUIDOnly);
+                }
+                catch (Exception)
+                {
+                }
                 return;
             }
             HomeViewModel.SpoofedTitleID = NewSpoofingID;
@@ -103,8 +109,19 @@ namespace XAU.ViewModels.Pages
         public async void SpoofGame()
         {
             CurrentSpoofingID = NewSpoofingID;
-            GameInfoResponse = await _xboxRestAPI.Value.GetGameTitleAsync(HomeViewModel.XUIDOnly, NewSpoofingID);
-            GameStatsResponse = await _xboxRestAPI.Value.GetGameStatsAsync(HomeViewModel.XUIDOnly, NewSpoofingID);
+            try
+            {
+                GameInfoResponse = await _xboxRestAPI.Value.GetGameTitleAsync(HomeViewModel.XUIDOnly, NewSpoofingID);
+                GameStatsResponse = await _xboxRestAPI.Value.GetGameStatsAsync(HomeViewModel.XUIDOnly, NewSpoofingID);
+            }
+            catch (Exception ex)
+            {
+                _snackbarService.Show("Error: Unable to acquire game info or stats",
+                    $"The request failed: {ex.Message}",
+                    ControlAppearance.Danger,
+                    new SymbolIcon(SymbolRegular.ErrorCircle24), _snackbarDuration);
+                return;
+            }
 
             if (GameInfoResponse == null || GameStatsResponse == null || !GameInfoResponse.Titles.Any())
             {
@@ -168,7 +185,7 @@ namespace XAU.ViewModels.Pages
             Stopwatch stopwatch = new Stopwatch();
             stopwatch.Start();
             SpoofingText = "Spoofing started...";
-            await _xboxRestAPI.Value.SendHeartbeatAsync(HomeViewModel.XUIDOnly, CurrentSpoofingID);
+            await TrySendHeartbeat();
             var lastHeartbeat = DateTime.UtcNow;
             SpoofingUpdate = false;
             while (!SpoofingUpdate)
@@ -180,12 +197,33 @@ namespace XAU.ViewModels.Pages
                     HomeViewModel.SpoofedTitleID = "0";
                     break;
                 }
-                    SpoofingText = $"Spoofing {GameInfoResponse.Titles[0].Name} For: {stopwatch.Elapsed.ToString(@"hh\:mm\:ss")}";
+                SpoofingText = $"Spoofing {GameInfoResponse?.Titles?.FirstOrDefault()?.Name ?? CurrentSpoofingID} For: {stopwatch.Elapsed.ToString(@"hh\:mm\:ss")}";
                 if ((DateTime.UtcNow - lastHeartbeat).TotalSeconds >= 300)
                 {
-                    await _xboxRestAPI.Value.SendHeartbeatAsync(HomeViewModel.XUIDOnly, CurrentSpoofingID);
+                    await TrySendHeartbeat();
                     lastHeartbeat = DateTime.UtcNow;
                 }
+                else
+                {
+                    if (SpoofingUpdate)
+                    {
+                        HomeViewModel.SpoofingStatus = 0;
+                        HomeViewModel.SpoofedTitleID = "0";
+                        break;
+                    }
+                SpoofingText = $"Spoofing {GameInfoResponse?.Titles?.FirstOrDefault()?.Name ?? CurrentSpoofingID} For: {stopwatch.Elapsed.ToString(@"hh\:mm\:ss")}";
+                }
+            }
+        }
+
+        private async Task TrySendHeartbeat()
+        {
+            try
+            {
+                await _xboxRestAPI.Value.SendHeartbeatAsync(HomeViewModel.XUIDOnly, CurrentSpoofingID);
+            }
+            catch (Exception)
+            {
             }
         }
 
@@ -332,7 +370,16 @@ namespace XAU.ViewModels.Pages
                 return;
             }
 
-            var profileData = await _xboxRestAPI.Value.GetGamertagProfileAsync(Gamertag) ?? new JObject();
+            JObject profileData;
+            try
+            {
+                profileData = await _xboxRestAPI.Value.GetGamertagProfileAsync(Gamertag) ?? new JObject();
+            }
+            catch (Exception)
+            {
+                _snackbarService.Show("Error", "Failed to fetch gamertag information.", ControlAppearance.Danger, new SymbolIcon(SymbolRegular.ErrorCircle24), _snackbarDuration);
+                return;
+            }
             var profileUsers = profileData["profileUsers"]?.FirstOrDefault();
             if (profileUsers == null)
             {

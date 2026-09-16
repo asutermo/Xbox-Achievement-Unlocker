@@ -71,7 +71,7 @@ namespace XAU.ViewModels.Pages
         [RelayCommand]
         private void RefreshProfile()
         {
-            GrabProfile();
+            GrabProfile(force: true);
         }
 
         public static string XAUTH = "";
@@ -180,21 +180,29 @@ namespace XAU.ViewModels.Pages
         }
         private async void CheckForEventUpdates()
         {
-            if (EventsVersion == "EmptyDevEventsVersion")
-                return;
-            var response = await _gitHubRestAPI.Value.CheckForEventUpdatesAsync();
-            var EventsTimestamp = 0;
-            if (File.Exists(EventsMetaFilePath))
+            try
             {
-                var metaJson = File.ReadAllText(EventsMetaFilePath);
-                var meta = JsonConvert.DeserializeObject<EventsUpdateResponse>(metaJson);
-                EventsTimestamp = meta.Timestamp;
-            }
+                if (EventsVersion == "EmptyDevEventsVersion")
+                    return;
+                var response = await _gitHubRestAPI.Value.CheckForEventUpdatesAsync();
+                var EventsTimestamp = 0;
+                if (File.Exists(EventsMetaFilePath))
+                {
+                    var metaJson = File.ReadAllText(EventsMetaFilePath);
+                    var meta = JsonConvert.DeserializeObject<EventsUpdateResponse>(metaJson);
+                    EventsTimestamp = meta.Timestamp;
+                }
 
-            if (response.Timestamp > EventsTimestamp && response.DataVersion == EventsVersion)
+                if (response.Timestamp > EventsTimestamp && response.DataVersion == EventsVersion)
+                {
+                    _snackbarService.Show("Downloading Events Update...", "Please wait", ControlAppearance.Info, new SymbolIcon(SymbolRegular.Checkmark24), _snackbarDuration);
+                    UpdateEvents();
+                }
+            }
+            catch (Exception ex)
             {
-                _snackbarService.Show("Downloading Events Update...", "Please wait", ControlAppearance.Info, new SymbolIcon(SymbolRegular.Checkmark24), _snackbarDuration);
-                UpdateEvents();
+                _snackbarService.Show("Events Update Check Failed", $"Could not check for event updates: {ex.Message}",
+                    ControlAppearance.Caution, new SymbolIcon(SymbolRegular.Warning24), _snackbarDuration);
             }
         }
 
@@ -324,8 +332,6 @@ namespace XAU.ViewModels.Pages
 
         private async Task InitializeViewModel()
         {
-            CheckForToolUpdates();
-            await LoadWamAccounts();
             if (!File.Exists(SettingsFilePath))
             {
                 if (!Directory.Exists(Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.MyDocuments),
@@ -374,6 +380,9 @@ namespace XAU.ViewModels.Pages
             catch (Exception ex)
             {
                 EventsLog($"WAM account load failed: {ex.Message}");
+            }
+            catch (Exception)
+            {
             }
         }
 
@@ -476,9 +485,56 @@ namespace XAU.ViewModels.Pages
             catch { }
         }
 
-        #region Profile
-        private async void GrabProfile()
+        /// <summary>
+        /// Clears all cached authentication state (WAM session tokens, XAUTH, events token).
+        /// The user will need to log in again after calling this.
+        /// </summary>
+        public void ClearAuthCache()
         {
+            // Invalidate XAUTH so the next scan/login re-acquires it
+            XAUTH = "";
+            InitComplete = false;
+
+            // Clear events token from memory
+            AchievementsViewModel.EventsToken = null;
+
+            // Reset login state and profile display
+            IsLoggedIn = false;
+            StopTokenRefreshTimer();
+            LoginText = "Login";
+
+            // Rebuild the Xbox REST API so no stale token is attached
+            _xboxRestAPI = new Lazy<XboxRestAPI>(() => new XboxRestAPI(XAUTH));
+        }
+        #region Profile
+        /// <summary>
+        /// Decides whether a profile fetch is allowed to start. Prevents the ~1s XauthWorker
+        /// progress ticks (and the login/refresh paths) from re-invoking the async-void
+        /// GrabProfile while an earlier fetch is still awaiting its network calls — which used
+        /// to stack a burst of "Profile information grabbed" snackbars.
+        /// - Automatic callers (worker ticks / login): require a logged-in user that has not
+        ///   already been grabbed, and require no fetch currently running.
+        /// - Manual caller (Refresh Profile button, force=true): allow a re-grab even when
+        ///   already grabbed, but still do not stack while a fetch is in-flight.
+        /// </summary>
+        public static bool ShouldStartProfileGrab(bool isLoggedIn, bool alreadyGrabbed, bool inFlight, bool force = false)
+        {
+            if (inFlight)
+                return false;
+            if (!isLoggedIn)
+                return false;
+            return force || !alreadyGrabbed;
+        }
+
+        private async void GrabProfile(bool force = false)
+        {
+            // The guard runs synchronously before the first await, so the ~1s progress ticks
+            // delivered on the dispatcher can never slip a second concurrent fetch in while the
+            // first is still pending. The in-flight flag is cleared in the finally block below.
+            if (!ShouldStartProfileGrab(IsLoggedIn, GrabbedProfile, _grabProfileInFlight, force))
+                return;
+
+            _grabProfileInFlight = true;
             try
             {
                 var profileResponse = await _xboxRestAPI.Value.GetProfileAsync(XUIDOnly);
@@ -591,6 +647,10 @@ namespace XAU.ViewModels.Pages
             catch (Exception ex)
             {
                 _snackbarService.Show("Error", "Failed to grab profile information. " + ex.Message, ControlAppearance.Danger, new SymbolIcon(SymbolRegular.ErrorCircle24), _snackbarDuration);
+            }
+            finally
+            {
+                _grabProfileInFlight = false;
             }
         }
 

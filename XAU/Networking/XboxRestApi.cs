@@ -9,11 +9,11 @@ using XAU.ViewModels.Windows;
 
 public class XboxRestAPI
 {
-    private readonly HttpClient _httpClient;
+    internal readonly HttpClient _httpClient;
 
-    private readonly HttpClient _eventBasedClient; // Dumb, but needed for events for now
+    internal readonly HttpClient _eventBasedClient; // Dumb, but needed for events for now
 
-    private readonly HttpClient _spooferClient;
+    internal readonly HttpClient _spooferClient;
 
     // User specifics
     private readonly string _xauth;
@@ -22,7 +22,8 @@ public class XboxRestAPI
     public XboxRestAPI(string xauth)
     {
         _xauth = xauth;
-        _requestedResponseLanguage = HomeViewModel.Settings.RegionOverride ? "en-GB" : System.Globalization.CultureInfo.CurrentCulture.Name;
+        _requestedResponseLanguage = ResolveAcceptLanguage(HomeViewModel.Settings.RegionOverride,
+            System.Globalization.CultureInfo.CurrentCulture.Name);
         var handler = new HttpClientHandler()
         {
             AutomaticDecompression = DecompressionMethods.GZip | DecompressionMethods.Deflate
@@ -39,10 +40,18 @@ public class XboxRestAPI
         _eventBasedClient = new HttpClient(insecureEventsHandler);
     }
 
-    private void SetDefaultHeaders()
+    internal static string ResolveAcceptLanguage(bool regionOverride, string? cultureName) =>
+        regionOverride || string.IsNullOrWhiteSpace(cultureName) ? "en-GB" : cultureName;
+
+    internal string CurrentXauth =>
+        !string.IsNullOrWhiteSpace(HomeViewModel.XAUTH) ? HomeViewModel.XAUTH : _xauth;
+
+    internal void SetDefaultHeaders()
     {
         _httpClient.DefaultRequestHeaders.Clear();
-        _httpClient.DefaultRequestHeaders.Add(HeaderNames.Authorization, _xauth);
+        var xauth = CurrentXauth;
+        if (!string.IsNullOrWhiteSpace(xauth))
+            _httpClient.DefaultRequestHeaders.Add(HeaderNames.Authorization, xauth);
         _httpClient.DefaultRequestHeaders.Add(HeaderNames.AcceptLanguage, _requestedResponseLanguage);
         _httpClient.DefaultRequestHeaders.Add(HeaderNames.AcceptEncoding, HeaderValues.AcceptEncoding);
         _httpClient.DefaultRequestHeaders.Add(HeaderNames.Accept, HeaderValues.Accept);
@@ -58,10 +67,12 @@ public class XboxRestAPI
 #endif
     }
 
-    private void SetDefaultSpooferHeaders()
+    internal void SetDefaultSpooferHeaders()
     {
         _spooferClient.DefaultRequestHeaders.Clear();
-        _spooferClient.DefaultRequestHeaders.Add(HeaderNames.Authorization, _xauth);
+        var xauth = CurrentXauth;
+        if (!string.IsNullOrWhiteSpace(xauth))
+            _spooferClient.DefaultRequestHeaders.Add(HeaderNames.Authorization, xauth);
         _spooferClient.DefaultRequestHeaders.Add(HeaderNames.AcceptLanguage, _requestedResponseLanguage);
         _spooferClient.DefaultRequestHeaders.Add(HeaderNames.AcceptEncoding, HeaderValues.AcceptEncoding);
         _spooferClient.DefaultRequestHeaders.Add(HeaderNames.Accept, HeaderValues.Accept);
@@ -76,7 +87,7 @@ public class XboxRestAPI
 #endif
     }
 
-    private void SetDefaultEventBasedHeaders()
+    internal void SetDefaultEventBasedHeaders()
     {
         _eventBasedClient.DefaultRequestHeaders.Clear();
         _eventBasedClient.DefaultRequestHeaders.Add("user-agent", "MSDW");
@@ -89,9 +100,9 @@ public class XboxRestAPI
         _eventBasedClient.DefaultRequestHeaders.Add("Client-Id", "NO_AUTH");
         _eventBasedClient.DefaultRequestHeaders.Add(HeaderNames.Host, Hosts.Telemetry);
         _eventBasedClient.DefaultRequestHeaders.Add(HeaderNames.Connection, "close");
-        ;
-        var authxtoken = Regex.Replace(_xauth, @"XBL3\.0 x=\d+;", "XBL3.0 x=-;");
-        _eventBasedClient.DefaultRequestHeaders.Add("authxtoken", authxtoken);
+        var authxtoken = Regex.Replace(CurrentXauth ?? "", @"XBL3\.0 x=\d+;", "XBL3.0 x=-;");
+        if (!string.IsNullOrWhiteSpace(authxtoken))
+            _eventBasedClient.DefaultRequestHeaders.Add("authxtoken", authxtoken);
 
 #if DEBUG
         Console.WriteLine("Headers in _eventBasedClient:");

@@ -80,11 +80,38 @@ namespace XAU.ViewModels.Pages
                 return;
             }
 
+            if (!HomeViewModel.InitComplete)
+            {
+                _snackbarService.Show(
+                    "Error",
+                    "You are not logged in yet.",
+                    ControlAppearance.Danger,
+                    new SymbolIcon(SymbolRegular.ErrorCircle24),
+                    _snackbarDuration
+                );
+                return;
+            }
+
             Games.Clear();
             LoadingStart();
             // JSON deserialization runs on the threadpool (see GetGamesListAsync),
             // so the UI thread stays free while thousands of titles are parsed.
-            GamesResponse = await _xboxRestAPI.Value.GetGamesListAsync(XuidOverride) ?? new TitlesList();
+            try
+            {
+                GamesResponse = await _xboxRestAPI.Value.GetGamesListAsync(XuidOverride) ?? new TitlesList();
+            }
+            catch (Exception ex)
+            {
+                LoadingEnd();
+                _snackbarService.Show(
+                    "Error",
+                    $"Failed to fetch games list: {ex.Message}",
+                    ControlAppearance.Danger,
+                    new SymbolIcon(SymbolRegular.ErrorCircle24),
+                    _snackbarDuration
+                );
+                return;
+            }
 
             // Build into a plain List first, then assign a single ObservableCollection.
             // Constructing it from a pre-built list copies the backing storage in bulk

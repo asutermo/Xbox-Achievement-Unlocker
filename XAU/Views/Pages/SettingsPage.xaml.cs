@@ -14,5 +14,18 @@ namespace XAU.Views.Pages
             DataContext = this;
             InitializeComponent();
         }
+
+        private void ClearAuthCacheButton_OnClick(object sender, RoutedEventArgs e)
+        {
+            var homeViewModel = App.GetService<HomeViewModel>();
+            homeViewModel.ClearAuthCache();
+
+            _snackbarService = App.GetService<ISnackbarService>();
+            _snackbarService.Show(
+                "Auth Cache Cleared",
+                "All tokens have been deleted. Log in again from the Home page.",
+                ControlAppearance.Success,
+                new SymbolIcon(SymbolRegular.Checkmark24));
+        }
     }
 }
