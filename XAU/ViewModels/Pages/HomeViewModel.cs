@@ -100,6 +100,15 @@ namespace XAU.ViewModels.Pages
         public static string XAUTH = "";
         public static string XUIDOnly;
         public static bool InitComplete = false;
+
+        // Cadence/anti-thrash state for the memory-scan token grabber. While we already hold a
+        // (possibly expired) token we don't re-scan the whole user address space on every ~1s poll
+        // tick -- only often enough to notice the Xbox app refreshing to a NEW token. See
+        // ShouldScanForXauth / ShouldAdoptScannedToken.
+        private static readonly TimeSpan XauthScanInterval = TimeSpan.FromSeconds(5);
+        private static DateTime _lastXauthScanUtc = DateTime.MinValue;
+        private bool _xauthScanInFlight = false;
+
         private bool _isInitialized = false;
         private bool _isInitializing = false;
         string SettingsFilePath = Path.Combine(Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.MyDocuments), "XAU"), "settings.json");
@@ -507,50 +516,97 @@ namespace XAU.ViewModels.Pages
         {
             StartWorker(XauthWorker);
         }
+        /// <summary>
+        /// True when the ~1s XauthWorker tick may start a fresh AoBScan. Once we hold a token we
+        /// only re-scan on XauthScanInterval so we can notice the Xbox app refreshing to a new
+        /// token, instead of hammering the whole address space (and the Xbox profile API, via the
+        /// re-armed TestXAUTH) every tick. `inFlight` stops overlapping scans; the `DateTime.MinValue`
+        /// fast-path makes the very first scan immediate.
+        /// </summary>
+        public static bool ShouldScanForXauth(DateTime lastScanUtc, DateTime nowUtc, bool inFlight)
+        {
+            if (inFlight)
+                return false;
+            if (lastScanUtc == DateTime.MinValue)
+                return true;
+            return (nowUtc - lastScanUtc) >= XauthScanInterval;
+        }
+
+        /// <summary>
+        /// True when a scanned token should be adopted. Keeps the original frequency>3 confidence
+        /// bar, but additionally requires the string to DIFFER from the token we already hold:
+        /// re-adopting an identical token would reset XAUTHTested=false and re-arm TestXAUTH, so an
+        /// expired token would be re-tested once per poll tick forever. Ignoring unchanged tokens
+        /// lets that dead token settle until the Xbox app produces a genuinely new one.
+        /// </summary>
+        public static bool ShouldAdoptScannedToken(string scanned, string current, int frequency)
+        {
+            if (frequency <= 3)
+                return false;
+            if (string.IsNullOrEmpty(scanned))
+                return false;
+            return scanned != current;
+        }
+
         private async void GetXAUTH()
         {
-            IEnumerable<long> XauthScanList = await m.AoBScan(XAuthScanPattern, true);
-            string[] XauthStrings = new string[XauthScanList.Count()];
-            var i = 0;
-            foreach (var address in XauthScanList)
-            {
-                XauthStrings[i] = m.ReadString(address.ToString("X"), length: 10000);
-                i++;
-            }
-
-            Dictionary<string, int> frequency = new Dictionary<string, int>();
-            foreach (string str in XauthStrings)
-            {
-                if (!frequency.ContainsKey(str))
-                {
-                    frequency[str] = 1;
-                }
-                else
-                {
-                    frequency[str]++;
-                }
-            }
-
-            if (XauthStrings.Length == 0)
-            {
+            if (!ShouldScanForXauth(_lastXauthScanUtc, DateTime.UtcNow, _xauthScanInFlight))
                 return;
-            }
 
-            string mostCommon = XauthStrings[0];
-            int highestFrequency = 0;
-            foreach (KeyValuePair<string, int> pair in frequency)
+            _xauthScanInFlight = true;
+            try
             {
-                if (pair.Value > highestFrequency)
+                IEnumerable<long> XauthScanList = await m.AoBScan(XAuthScanPattern, true);
+                // The expensive AoBScan has now run, so start backing off from here regardless of
+                // whether this particular scan yielded a usable token.
+                _lastXauthScanUtc = DateTime.UtcNow;
+
+                string[] XauthStrings = new string[XauthScanList.Count()];
+                var i = 0;
+                foreach (var address in XauthScanList)
                 {
-                    mostCommon = pair.Key;
-                    highestFrequency = pair.Value;
+                    XauthStrings[i] = m.ReadString(address.ToString("X"), length: 10000);
+                    i++;
+                }
+
+                Dictionary<string, int> frequency = new Dictionary<string, int>();
+                foreach (string str in XauthStrings)
+                {
+                    if (!frequency.ContainsKey(str))
+                    {
+                        frequency[str] = 1;
+                    }
+                    else
+                    {
+                        frequency[str]++;
+                    }
+                }
+
+                if (XauthStrings.Length == 0)
+                {
+                    return;
+                }
+
+                string mostCommon = XauthStrings[0];
+                int highestFrequency = 0;
+                foreach (KeyValuePair<string, int> pair in frequency)
+                {
+                    if (pair.Value > highestFrequency)
+                    {
+                        mostCommon = pair.Key;
+                        highestFrequency = pair.Value;
+                    }
+                }
+
+                if (ShouldAdoptScannedToken(mostCommon, XAUTH, highestFrequency))
+                {
+                    XAUTH = mostCommon;
+                    XAUTHTested = false;
                 }
             }
-
-            if (highestFrequency > 3)
+            finally
             {
-                XAUTH = mostCommon;
-                XAUTHTested = false;
+                _xauthScanInFlight = false;
             }
         }
         private async void TestXAUTH()
@@ -940,6 +996,10 @@ namespace XAU.ViewModels.Pages
 
             // Reset manual xauth flag so auto-scan can resume
             SettingsViewModel.ManualXauth = false;
+
+            // Forget scan cadence so the next tick does a fresh AoBScan immediately rather than
+            // waiting out the XauthScanInterval back-off from the pre-clear scan.
+            _lastXauthScanUtc = DateTime.MinValue;
 
             // Clear events token from memory
             AchievementsViewModel.EventsToken = null;
