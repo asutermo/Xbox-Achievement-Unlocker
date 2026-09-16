@@ -35,7 +35,20 @@ namespace XAU.ViewModels.Pages
         private Dictionary<int, DGAchievement> _unlockedAchievements = new Dictionary<int, DGAchievement>();
 
         private GameTitle GameInfoResponse = new GameTitle();
-        private string SpoofedGameName => GameInfoResponse?.Titles?.FirstOrDefault()?.Name ?? GameName;
+        private string SpoofedGameName => GetFirstTitleName(GameInfoResponse) ?? GameName;
+
+        /// <summary>
+        /// Reads the first spoofed title's name without blindly indexing the list. A blind
+        /// <c>Titles[0]</c> is what threw ArgumentOutOfRangeException when the shared response
+        /// was (re)assigned to an empty <c>GameTitle</c> while SpoofGame's spoof poll was in
+        /// flight. Returns null instead of throwing when there is no title to read.
+        /// </summary>
+        public static string? GetFirstTitleName(GameTitle? response)
+        {
+            if (response?.Titles == null || response.Titles.Count == 0)
+                return null;
+            return response.Titles[0]?.Name;
+        }
         // TODO: this needs to be updated if language changes
         private Lazy<XboxRestAPI> _xboxRestAPI = new Lazy<XboxRestAPI>(() => new XboxRestAPI(HomeViewModel.XAUTH));
 
@@ -176,6 +189,13 @@ namespace XAU.ViewModels.Pages
             }
         }
 
+        // Fire-and-forget from OnNavigatedTo/InitializeViewModel/RefreshAchievements. It stays
+        // `async void` (non-blocking) because Spoofing() polls until a spoof completes, which can
+        // be minutes. It deliberately does NOT swallow unexpected faults: transient network errors
+        // are handled where they occur (TrySendHeartbeat), and the previous
+        // ArgumentOutOfRangeException here was a real bug — a blind Titles[0] read — so it is fixed
+        // at the source via GetFirstTitleName rather than masked with a snackbar. Anything that
+        // still escapes is a genuine defect and should surface to the crash dialog.
         private async void SpoofGame()
         {
             if (HomeViewModel.SpoofingStatus == 1)
@@ -196,7 +216,7 @@ namespace XAU.ViewModels.Pages
                 HomeViewModel.AutoSpoofedTitleID = TitleIDOverride;
                 HomeViewModel.SpoofingStatus = 2;
                 GameInfo = "Auto Spoofing";
-                if (GameInfoResponse.Titles.Any())
+                if (GetFirstTitleName(GameInfoResponse) != null)
                 {
                     GameName = SpoofedGameName;
                 }
@@ -217,8 +237,6 @@ namespace XAU.ViewModels.Pages
                 }
                 HomeViewModel.AutoSpoofedTitleID = "0";
             }
-
-
         }
 
         public async Task Spoofing()
