@@ -123,6 +123,15 @@ namespace XAU.Views.Pages
                 return;
             }
 
+            // Belt-and-suspenders against rapid clicks: the button self-disables on click, but guard on
+            // the VM's own single-flight flag too so a same-tick double-fire can't launch a second grab
+            // (and can't fire a duplicate "Scanning..." toast).
+            if (_homeViewModel.ManualScanRunning)
+                return;
+
+            _manualScanInProgress = true;
+            GrabEventsTokenButton.IsEnabled = false;
+
             _snackbarService.Show(
                 "Scanning...",
                 "Launching Solitaire and scanning for events token. Flip a card to speed it up.",
@@ -130,8 +139,6 @@ namespace XAU.Views.Pages
                 new SymbolIcon(SymbolRegular.Search24)
             );
 
-            _manualScanInProgress = true;
-            GrabEventsTokenButton.IsEnabled = false;
             _homeViewModel.ScanForEventsTokenManual();
         }
 

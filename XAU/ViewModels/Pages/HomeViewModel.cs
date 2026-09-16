@@ -734,17 +734,32 @@ namespace XAU.ViewModels.Pages
                     else
                         EventsLog("Token missing/invalid, refreshing...");
 
-                    // Keep capturing until we get a token or settings change
+                    // Keep capturing until we get a token or settings change. Take the shared ETW gate
+                    // (with a timeout so we can't wedge behind a long manual grab) so the auto worker and
+                    // the manual button never drive the process-wide trace / Solitaire at the same time.
                     while (Settings.AutoGrabEventsToken && IsLoggedIn)
                     {
-                        var token = EtwTokenCapture.Capture(20);
-                        if (!string.IsNullOrEmpty(token))
+                        if (!_etwGate.Wait(TimeSpan.FromSeconds(2)))
                         {
-                            AchievementsViewModel.EventsToken = token;
-                            _eventsTokenObtainedAt = DateTime.UtcNow;
-                            PersistEventsToken();
-                            EventsLog("ETW capture success.");
-                            break;
+                            EventsLog("ETW busy (manual grab in progress?), deferring capture...");
+                            Thread.Sleep(1000);
+                            continue;
+                        }
+                        try
+                        {
+                            var token = EtwTokenCapture.Capture(20);
+                            if (!string.IsNullOrEmpty(token))
+                            {
+                                AchievementsViewModel.EventsToken = token;
+                                _eventsTokenObtainedAt = DateTime.UtcNow;
+                                PersistEventsToken();
+                                EventsLog("ETW capture success.");
+                                break;
+                            }
+                        }
+                        finally
+                        {
+                            _etwGate.Release();
                         }
                         EventsLog("ETW capture found no token, retrying in 5s...");
                         Thread.Sleep(5000);
@@ -883,19 +898,48 @@ namespace XAU.ViewModels.Pages
         /// Manually triggers a scan (from the "Manually Refresh Token" button).
         /// Works regardless of the auto-grab setting.
         /// </summary>
-        public bool ManualScanRunning { get; private set; }
+        // Serialises every ETW/Solitaire consumer (the manual grab AND the auto-grab worker).
+        // GrabEventsTokenFromSolitaire drives process-wide ETW sessions, launches/kills Solitaire and
+        // shares eventsTokenFound/EventsToken, so two of them at once stomp each other: one tears down
+        // the trace another is extracting, or one nulls EventsToken right after the other set it.
+        // That is why a burst of clicks (or manual+auto overlap) made "refresh" appear to do nothing.
+        private readonly SemaphoreSlim _etwGate = new SemaphoreSlim(1, 1);
+
+        // Backed by a volatile field: the single-flight check+set happens on the UI thread (button
+        // clicks) and the clear happens on the background Task, polled by the DispatcherTimer.
+        private volatile bool _manualScanRunning;
+        public bool ManualScanRunning
+        {
+            get => _manualScanRunning;
+            private set => _manualScanRunning = value;
+        }
+
+        /// <summary>
+        /// Single-flight gate for the manual "Manually Refresh Token" button: a scan may start only when
+        /// none is already running. Repeated clicks -- or the 3s UI poll re-enabling the button while a
+        /// long Solitaire/ETW capture is still in progress -- are ignored rather than piling up
+        /// concurrent grabs that cancel each other out.
+        /// </summary>
+        public static bool ShouldStartManualScan(bool alreadyRunning) => !alreadyRunning;
 
         public void ScanForEventsTokenManual()
         {
-            eventsTokenFound = false;
-            AchievementsViewModel.EventsToken = null;
-            _eventsTokenObtainedAt = DateTime.MinValue;
+            // Synchronous single-flight on the UI thread: set true before Task.Run so an immediate
+            // re-entrant click is refused, and reset in the Task's finally (exactly one owner).
+            if (!ShouldStartManualScan(ManualScanRunning))
+                return;
             ManualScanRunning = true;
 
             System.Threading.Tasks.Task.Run(() =>
             {
+                // Take the shared gate so we never overlap the background auto-grab worker's ETW session.
+                _etwGate.Wait();
                 try
                 {
+                    eventsTokenFound = false;
+                    AchievementsViewModel.EventsToken = null;
+                    _eventsTokenObtainedAt = DateTime.MinValue;
+
                     GrabEventsTokenFromSolitaire();
                     if (!string.IsNullOrEmpty(AchievementsViewModel.EventsToken))
                     {
@@ -905,6 +949,7 @@ namespace XAU.ViewModels.Pages
                 }
                 finally
                 {
+                    _etwGate.Release();
                     ManualScanRunning = false;
                 }
             });
