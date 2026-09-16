@@ -235,7 +235,6 @@
                 x:Name="ClearAuthCacheButton"
                 Content="Clear Auth &amp; Re-login"
                 Click="ClearAuthCacheButton_OnClick"
-                Appearance="Danger"
                 HorizontalAlignment="Left" />
         </ui:CardControl>
         <ui:CardControl Margin="4,2" SizeChanged="XAuthBox_OnSizeChanged">
