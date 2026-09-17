@@ -4,6 +4,7 @@ using System.IO;
 using System.Security.Cryptography;
 using System.Text;
 using XAU.Util.Etw;
+using XAU.Util.Diagnostics;
 using System.Windows.Media;
 using Wpf.Ui.Controls;
 using Memory;
@@ -87,6 +88,25 @@ namespace XAU.ViewModels.Pages
         private void RefreshProfile()
         {
             GrabProfile(force: true);
+        }
+
+        [RelayCommand]
+        private void OpenXboxStatusPage()
+        {
+            try
+            {
+                var p = new Process();
+                p.StartInfo = new ProcessStartInfo
+                {
+                    UseShellExecute = true,
+                    FileName = "https://support.xbox.com/en-US/xbox-live-status"
+                };
+                p.Start();
+            }
+            catch (Exception ex)
+            {
+                EventsLog($"[XBLSTATUS] could not open status page: {ex.GetType().Name}: {ex.Message}");
+            }
         }
 
         Mem m = new Mem();

@@ -7,6 +7,7 @@ using System.DirectoryServices;
 using System.IO;
 using System.Text;
 using System.Windows.Input;
+using XAU.Util.Diagnostics;
 using Wpf.Ui.Common;
 using Wpf.Ui.Contracts;
 using Wpf.Ui.Controls;
@@ -28,6 +29,105 @@ namespace XAU.ViewModels.Pages
         {
             _snackbarService = snackbarService;
             _contentDialogService = new ContentDialogService();
+        }
+
+        // Xbox Live endpoint health check. It deliberately lives here (Misc) and runs ONLY on-demand,
+        // so the verbose per-service detail never clutters the Home landing page -- Home only offers
+        // a button that opens the official status page.
+        [ObservableProperty] private string _xboxServiceStatus = "not checked";
+        [ObservableProperty] private bool _isCheckingXboxServiceHealth = false;
+        [ObservableProperty] private List<string> _xboxServiceStatusLines = new List<string>();
+
+        /// <summary>
+        /// Probes the Xbox Live endpoints we actually use and classifies each reply. Any HTTP answer
+        /// (2xx-4xx) means "Xbox is awake; a 0h/'Unknown' is our token/data"; only a 5xx or an
+        /// unreachable endpoint points at a Microsoft-side outage.
+        /// </summary>
+        [RelayCommand]
+        private async void CheckXboxServiceHealth()
+        {
+            if (IsCheckingXboxServiceHealth)
+                return;
+            IsCheckingXboxServiceHealth = true;
+            try
+            {
+                var report = await _xboxRestAPI.Value.CheckServiceHealthAsync();
+                XboxServiceStatus = XblServiceHealth.OverallStatus(report.Results);
+                XboxServiceStatusLines = XblServiceHealth.StatusLines(report.Results);
+                if (report.LooksLikeServiceOutage)
+                    _snackbarService.Show("Xbox Live status",
+                        "Some Xbox Live services are DOWN/unreachable -- this looks like an Xbox-side problem, not XAU.",
+                        ControlAppearance.Caution, new SymbolIcon(SymbolRegular.Warning24), _snackbarDuration);
+                else
+                    _snackbarService.Show("Xbox Live status",
+                        "Xbox Live services are healthy. A 0h/'Unknown' profile here is an account/token issue, not an outage.",
+                        ControlAppearance.Success, new SymbolIcon(SymbolRegular.Checkmark24), _snackbarDuration);
+            }
+            catch (Exception ex)
+            {
+                XboxServiceStatus = "check failed";
+                XboxServiceStatusLines = new List<string>();
+                Debug.WriteLine($"[XBLSTATUS] check threw {ex.GetType().Name}: {ex.Message}");
+            }
+            finally
+            {
+                IsCheckingXboxServiceHealth = false;
+            }
+        }
+
+        /// <summary>
+        /// Pulls the MinutesPlayed figure (in minutes) out of a userstats batch response by scanning
+        /// EVERY stat bucket for one whose Name is "MinutesPlayed", instead of trusting [0][0]. Returns
+        /// the LARGEST matching value (the all-time aggregate dominates any seasonal/device slice) or -1
+        /// when no MinutesPlayed stat exists at all (caller then shows "Unknown").
+        /// </summary>
+        public static double GetMinutesPlayed(GameStatsResponse response)
+        {
+            if (response == null || response.StatListsCollection == null)
+                return -1;
+
+            double best = -1;
+            foreach (var list in response.StatListsCollection)
+            {
+                if (list == null || list.Stats == null)
+                    continue;
+                foreach (var stat in list.Stats)
+                {
+                    if (stat == null || string.IsNullOrEmpty(stat.Value))
+                        continue;
+                    if (!string.Equals(stat.Name, "MinutesPlayed", StringComparison.OrdinalIgnoreCase))
+                        continue;
+                    if (double.TryParse(stat.Value,
+                            System.Globalization.NumberStyles.Float | System.Globalization.NumberStyles.AllowThousands,
+                            System.Globalization.CultureInfo.InvariantCulture, out double value) && value > best)
+                    {
+                        best = value;
+                    }
+                }
+            }
+            return best;
+        }
+
+        /// <summary>Debug-only: renders every (listIndex, statIndex) Name/Type/Value so a live run shows
+        /// WHICH bucket actually carries the minutesplayed figure (see [STATDBG] log).</summary>
+        public static string DumpStatBuckets(GameStatsResponse response)
+        {
+            if (response == null || response.StatListsCollection == null)
+                return "<no stat lists>";
+
+            var sb = new StringBuilder();
+            for (int i = 0; i < response.StatListsCollection.Count; i++)
+            {
+                var list = response.StatListsCollection[i];
+                if (list == null || list.Stats == null)
+                    continue;
+                for (int j = 0; j < list.Stats.Count; j++)
+                {
+                    var s = list.Stats[j];
+                    sb.Append($"[{i}][{j}] name={s?.Name} type={s?.Type} value={s?.Value}; ");
+                }
+            }
+            return sb.Length == 0 ? "<empty>" : sb.ToString();
         }
 
         public void OnNavigatedTo()
@@ -149,14 +249,23 @@ namespace XAU.ViewModels.Pages
                 GameDevices = GameDevices.Remove(GameDevices.Length - 2);
                 GameGamerscore = "Gamerscore: " + GameInfoResponse.Titles[0].Achievement?.CurrentGamerscore.ToString() +
                                  "/" + GameInfoResponse.Titles[0].Achievement?.TotalGamerscore.ToString();
-                try
+                // The userstats batch can return MORE THAN ONE "MinutesPlayed" bucket (an all-time
+                // aggregate plus seasonal/device slices). The old code read [0][0] blindly, so when the
+                // first bucket happened to be a 0-minute seasonal slice XAU showed 0h 0m even though
+                // TrueAchievements (which selects by statistic + takes the aggregate) showed real time.
+                // Select by statistic NAME across every bucket and keep the largest -- the all-time
+                // aggregate always dominates any single slice. See GetMinutesPlayed.
+                Debug.WriteLine($"[STATDBG] raw buckets: {DumpStatBuckets(GameStatsResponse)}");
+                double minutesPlayed = GetMinutesPlayed(GameStatsResponse);
+                if (minutesPlayed >= 0)
                 {
-                    var timePlayed = TimeSpan.FromMinutes(Convert.ToDouble(GameStatsResponse.StatListsCollection[0].Stats[0].Value));
+                    var timePlayed = TimeSpan.FromMinutes(minutesPlayed);
                     var formattedTime = $"{timePlayed.Days} Days, {timePlayed.Hours} Hours and {timePlayed.Minutes} minutes";
                     GameTime = "Time Played: " + formattedTime;
                 }
-                catch
+                else
                 {
+                    // No MinutesPlayed stat at all in any bucket -- be honest rather than print a bogus 0.
                     GameTime = "Time Played: Unknown";
                 }
 
