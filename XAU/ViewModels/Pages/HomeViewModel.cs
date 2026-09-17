@@ -2,6 +2,21 @@ using System.Collections.ObjectModel;
 using System.ComponentModel;
 using System.Diagnostics;
 using System.IO;
+<<<<<<< HEAD
+=======
+using System.Security.Cryptography;
+using System.Text;
+using XAU.Util.Etw;
+using XAU.Util.Diagnostics;
+using System.Windows.Media;
+using Wpf.Ui.Controls;
+using Memory;
+using System.Net.Http;
+using Newtonsoft.Json.Linq;
+using Newtonsoft.Json;
+using System.Net;
+using System.Collections.ObjectModel;
+>>>>>>> 91bebb8 (Add xbox status check checks)
 using System.IO.Compression;
 using System.Net;
 using System.Net.Http;
@@ -74,6 +89,36 @@ namespace XAU.ViewModels.Pages
             GrabProfile(force: true);
         }
 
+<<<<<<< HEAD
+=======
+        [RelayCommand]
+        private void OpenXboxStatusPage()
+        {
+            try
+            {
+                var p = new Process();
+                p.StartInfo = new ProcessStartInfo
+                {
+                    UseShellExecute = true,
+                    FileName = "https://support.xbox.com/en-US/xbox-live-status"
+                };
+                p.Start();
+            }
+            catch (Exception ex)
+            {
+                EventsLog($"[XBLSTATUS] could not open status page: {ex.GetType().Name}: {ex.Message}");
+            }
+        }
+
+        Mem m = new Mem();
+        public BackgroundWorker XauthWorker = new BackgroundWorker();
+        public BackgroundWorker EventsTokenWorker = new BackgroundWorker();
+        bool IsAttached = false;
+        bool GrabbedProfile = false;
+        bool _grabProfileInFlight = false;
+        bool eventsTokenFound = false;
+        public static bool XAUTHTested = false;
+>>>>>>> 91bebb8 (Add xbox status check checks)
         public static string XAUTH = "";
         public static string XUIDOnly = "";
         public static bool InitComplete = false;

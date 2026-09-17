@@ -2,6 +2,7 @@ using System.Net;
 using System.Net.Http;
 using System.Text;
 using System.Text.RegularExpressions;
+using XAU.Util.Diagnostics;
 using Newtonsoft.Json;
 using Newtonsoft.Json.Linq;
 using XAU.ViewModels.Pages;
@@ -14,6 +15,11 @@ public class XboxRestAPI
     internal readonly HttpClient _eventBasedClient; // Dumb, but needed for events for now
 
     internal readonly HttpClient _spooferClient;
+
+    // Dedicated, UNAUTHENTICATED client used only by CheckServiceHealthAsync() to liveness-probe
+    // the Xbox Live endpoints. Kept separate so a status ping never disturbs the authed clients'
+    // default headers.
+    internal readonly HttpClient _probeClient;
 
     // User specifics
     private readonly string _xauth;
@@ -38,6 +44,75 @@ public class XboxRestAPI
             ServerCertificateCustomValidationCallback = HttpClientHandler.DangerousAcceptAnyServerCertificateValidator
         };
         _eventBasedClient = new HttpClient(insecureEventsHandler);
+
+        var probeHandler = new HttpClientHandler()
+        {
+            AutomaticDecompression = DecompressionMethods.GZip | DecompressionMethods.Deflate
+        };
+        _probeClient = new HttpClient(probeHandler);
+    }
+
+    private struct ProbeTarget
+    {
+        public string Name;
+        public string Url;
+        public ProbeTarget(string name, string url) { Name = name; Url = url; }
+    }
+
+    // The exact endpoints this tool leans on (all straight from Constants, so known-good). If Xbox
+    // play-time reads 0 everywhere, the one that matters most is "userstats".
+    private static readonly ProbeTarget[] ServiceProbeTargets = new[]
+    {
+        new ProbeTarget("profile", "https://profile.xboxlive.com/users/me/profile/settings?settings=Gamertag"),
+        new ProbeTarget("achievements", "https://achievements.xboxlive.com/"),
+        new ProbeTarget("userstats", "https://userstats.xboxlive.com/"),
+        new ProbeTarget("titlehub", "https://titlehub.xboxlive.com/"),
+        new ProbeTarget("presence", "https://presence-heartbeat.xboxlive.com/"),
+    };
+
+    /// <summary>
+    /// Liveness-probes the Xbox Live endpoints above and classifies the HTTP class of each reply.
+    /// The classification is the whole point: 2xx-4xx means "Xbox is awake; the problem is our
+    /// token/data", while only a 5xx or a total failure-to-reach an endpoint is evidence of a
+    /// Microsoft-side outage. No auth is sent, so a 401/403 here is EXPECTED and still counts as
+    /// "responding" -- deliberately NOT an outage signal.
+    /// </summary>
+    public async Task<XblServiceHealthReport> CheckServiceHealthAsync()
+    {
+        var results = new List<XblServiceProbeResult>();
+        foreach (var target in ServiceProbeTargets)
+        {
+            bool reached = false;
+            int code = 0;
+            string detail = null;
+            try
+            {
+                var response = await _probeClient.GetAsync(target.Url);
+                reached = true;
+                code = (int)response.StatusCode;
+            }
+            catch (HttpRequestException ex)
+            {
+                // A status code means the endpoint DID answer over HTTP -> it is reachable.
+                int c = (int)ex.StatusCode;
+                reached = c != 0;
+                code = c;
+                detail = ex.StatusCode + " " + ex.Message;
+            }
+            catch (Exception ex)
+            {
+                reached = false;
+                code = 0;
+                detail = ex.GetType().Name + ": " + ex.Message;
+            }
+
+            var verdict = XblServiceHealth.Classify(reached, code);
+            results.Add(new XblServiceProbeResult(target.Name, target.Url, reached, code, verdict, detail));
+            HomeViewModel.EventsLog($"[XBLSTATUS] {target.Name}: {verdict} code={code} {detail}");
+        }
+
+        return new XblServiceHealthReport(
+            results, XblServiceHealth.Summarize(results), XblServiceHealth.LooksLikeServiceOutage(results));
     }
 
     internal static string ResolveAcceptLanguage(bool regionOverride, string? cultureName) =>
