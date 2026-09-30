@@ -12,6 +12,7 @@ public class SpooferLifecycleTests : IDisposable
     {
         HomeViewModel.XUIDOnly = "synthetic-xuid";
         HomeViewModel.XAUTH = "";
+        HomeViewModel.XAUTHTested = false;
         HomeViewModel.SpoofingStatus = 0;
         HomeViewModel.SpoofedTitleID = "0";
         HomeViewModel.AutoSpoofedTitleID = "0";
@@ -22,6 +23,7 @@ public class SpooferLifecycleTests : IDisposable
     {
         HomeViewModel.XUIDOnly = "";
         HomeViewModel.XAUTH = "";
+        HomeViewModel.XAUTHTested = false;
         HomeViewModel.SpoofingStatus = 0;
         HomeViewModel.SpoofedTitleID = "0";
         HomeViewModel.AutoSpoofedTitleID = "0";
@@ -174,6 +176,207 @@ public class SpooferLifecycleTests : IDisposable
         Assert.Equal(TimeSpan.FromSeconds(1), delay);
         await vm.SpooferButtonClicked();
         await running.WaitAsync(TimeSpan.FromSeconds(3));
+    }
+
+    [Fact]
+    public async Task Manual_401WaitsForDelayedRefreshBeforeRetryingHeartbeat()
+    {
+        HomeViewModel.XAUTH = "XBL3.0 x=1;synthetic-expired";
+        HomeViewModel._isLoggedIn = true;
+        var recovery = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+        var recovering = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        int heartbeats = 0;
+        var api = FakeApi((request, _) => Task.FromResult(request.RequestUri!.Host switch
+        {
+            "titlehub.xboxlive.com" => Json("{\"titles\":[{\"name\":\"Game\",\"titleId\":\"222\",\"devices\":[\"PC\"]}]}"),
+            "userstats.xboxlive.com" => Json("{\"statListsCollection\":[]}"),
+            _ => Json("{}", Interlocked.Increment(ref heartbeats) == 1
+                ? HttpStatusCode.Unauthorized : HttpStatusCode.OK)
+        }));
+        var vm = new MiscViewModel(null!) { NewSpoofingID = "222" };
+        InjectApi(vm, api);
+        vm.RecoverAuthAsync = () => { recovering.TrySetResult(); return recovery.Task; };
+        vm.AuthRecoveryTimeout = TimeSpan.FromSeconds(3);
+        vm.HeartbeatDelayAsync = (_, token) => Task.Delay(Timeout.InfiniteTimeSpan, token);
+
+        try
+        {
+            var running = vm.SpooferButtonClicked();
+            await recovering.Task.WaitAsync(TimeSpan.FromSeconds(3));
+            Assert.Equal(1, Volatile.Read(ref heartbeats));
+            Assert.Contains("Refreshing", vm.SpoofingText);
+            Assert.False(running.IsCompleted);
+
+            HomeViewModel.XAUTH = "XBL3.0 x=1;synthetic-refreshed";
+            HomeViewModel.XAUTHTested = true;
+            recovery.SetResult(true);
+            await Eventually(() => Volatile.Read(ref heartbeats) == 2);
+            Assert.Contains("Spoofing Game", vm.SpoofingText);
+            await vm.SpooferButtonClicked();
+            await running.WaitAsync(TimeSpan.FromSeconds(3));
+        }
+        finally
+        {
+            HomeViewModel._isLoggedIn = false;
+        }
+    }
+
+    [Fact]
+    public async Task Manual_MemoryTokenIsNotRetriedUntilProfileValidationSucceeds()
+    {
+        HomeViewModel.XAUTH = "XBL3.0 x=1;synthetic-expired";
+        HomeViewModel.XAUTHTested = true;
+        HomeViewModel._isLoggedIn = true;
+        var pollEntered = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var resumePoll = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        int heartbeats = 0;
+        var api = FakeApi((request, _) => Task.FromResult(request.RequestUri!.Host switch
+        {
+            "titlehub.xboxlive.com" => Json("{\"titles\":[{\"name\":\"Game\",\"titleId\":\"222\",\"devices\":[\"PC\"]}]}"),
+            "userstats.xboxlive.com" => Json("{\"statListsCollection\":[]}"),
+            _ => Json("{}", Interlocked.Increment(ref heartbeats) == 1
+                ? HttpStatusCode.Unauthorized : HttpStatusCode.OK)
+        }));
+        var vm = new MiscViewModel(null!) { NewSpoofingID = "222" };
+        InjectApi(vm, api);
+        vm.RecoverAuthAsync = () => Task.FromResult(false); // memory rescan starts asynchronously
+        vm.AuthRecoveryTimeout = TimeSpan.FromSeconds(3);
+        int polls = 0;
+        vm.AuthRecoveryDelayAsync = (_, token) =>
+        {
+            if (Interlocked.Increment(ref polls) != 1)
+                return Task.Delay(10, token);
+            pollEntered.TrySetResult();
+            return resumePoll.Task;
+        };
+        vm.HeartbeatDelayAsync = (_, token) => Task.Delay(Timeout.InfiniteTimeSpan, token);
+        var running = vm.SpooferButtonClicked();
+        try
+        {
+            await pollEntered.Task.WaitAsync(TimeSpan.FromSeconds(3));
+            HomeViewModel.XAUTH = "XBL3.0 x=1;synthetic-replacement";
+            HomeViewModel.XAUTHTested = false; // scanner adopted, profile has not validated it
+            resumePoll.SetResult();
+            await Task.Delay(50);
+            Assert.Equal(1, Volatile.Read(ref heartbeats));
+
+            HomeViewModel.XAUTHTested = true;
+            await Eventually(() => Volatile.Read(ref heartbeats) == 2);
+        }
+        finally
+        {
+            await vm.SpooferButtonClicked();
+            await running.WaitAsync(TimeSpan.FromSeconds(3));
+            HomeViewModel.XAUTHTested = false;
+            HomeViewModel._isLoggedIn = false;
+        }
+    }
+
+    [Fact]
+    public async Task Auto_401WaitsForDelayedRefreshBeforeRetryingHeartbeat()
+    {
+        HomeViewModel.XAUTH = "XBL3.0 x=1;synthetic-expired";
+        HomeViewModel._isLoggedIn = true;
+        HomeViewModel.AutoSpoofedTitleID = "333";
+        HomeViewModel.SpoofingStatus = 2;
+        var recovery = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+        var recovering = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        int heartbeats = 0;
+        var api = FakeApi((request, _) => Task.FromResult(Json("{}",
+            Interlocked.Increment(ref heartbeats) == 1 ? HttpStatusCode.Unauthorized : HttpStatusCode.OK)));
+        var vm = new AchievementsViewModel(null!, null!, null!) { GameInfo = "Auto Spoofing" };
+        InjectApi(vm, api);
+        vm.RecoverAuthAsync = () => { recovering.TrySetResult(); return recovery.Task; };
+        vm.AuthRecoveryTimeout = TimeSpan.FromSeconds(3);
+        vm.AutoSpoofDelayAsync = (_, token) => Task.Delay(Timeout.InfiniteTimeSpan, token);
+
+        try
+        {
+            var running = vm.Spoofing();
+            await recovering.Task.WaitAsync(TimeSpan.FromSeconds(3));
+            Assert.Equal(1, Volatile.Read(ref heartbeats));
+            Assert.False(running.IsCompleted);
+            HomeViewModel.XAUTH = "XBL3.0 x=1;synthetic-refreshed";
+            HomeViewModel.XAUTHTested = true;
+            recovery.SetResult(true);
+            await Eventually(() => Volatile.Read(ref heartbeats) == 2);
+            Assert.Equal(2, HomeViewModel.SpoofingStatus);
+            var run = (CancellationTokenSource)typeof(AchievementsViewModel)
+                .GetField("_autoSpoofCts", BindingFlags.NonPublic | BindingFlags.Instance)!.GetValue(vm)!;
+            run.Cancel();
+            await running.WaitAsync(TimeSpan.FromSeconds(3));
+        }
+        finally
+        {
+            HomeViewModel._isLoggedIn = false;
+        }
+    }
+
+    [Fact]
+    public async Task Manual_401RefreshTimeout_StopsInsteadOfPretendingPresenceIsActive()
+    {
+        HomeViewModel.XAUTH = "XBL3.0 x=1;synthetic-expired";
+        HomeViewModel._isLoggedIn = true;
+        var api = FakeApi((request, _) => Task.FromResult(request.RequestUri!.Host switch
+        {
+            "titlehub.xboxlive.com" => Json("{\"titles\":[{\"name\":\"Game\",\"titleId\":\"222\",\"devices\":[\"PC\"]}]}"),
+            "userstats.xboxlive.com" => Json("{\"statListsCollection\":[]}"),
+            _ => Json("{}", HttpStatusCode.Unauthorized)
+        }));
+        var vm = new MiscViewModel(null!) { NewSpoofingID = "222" };
+        InjectApi(vm, api);
+        vm.RecoverAuthAsync = () => Task.FromResult(false);
+        vm.AuthRecoveryTimeout = TimeSpan.FromMilliseconds(30);
+
+        try
+        {
+            await vm.SpooferButtonClicked().WaitAsync(TimeSpan.FromSeconds(3));
+            Assert.Equal(0, HomeViewModel.SpoofingStatus);
+            Assert.Contains("did not refresh", vm.SpoofingText);
+        }
+        finally
+        {
+            HomeViewModel._isLoggedIn = false;
+        }
+    }
+
+    [Fact]
+    public async Task Manual_StopDuringRecovery_CannotResumeOldSpoof()
+    {
+        HomeViewModel.XAUTH = "XBL3.0 x=1;synthetic-expired";
+        HomeViewModel._isLoggedIn = true;
+        var entered = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var recovery = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+        int heartbeats = 0;
+        var api = FakeApi((request, _) => Task.FromResult(request.RequestUri!.Host switch
+        {
+            "titlehub.xboxlive.com" => Json("{\"titles\":[{\"name\":\"Game\",\"titleId\":\"222\",\"devices\":[\"PC\"]}]}"),
+            "userstats.xboxlive.com" => Json("{\"statListsCollection\":[]}"),
+            _ => request.Method == HttpMethod.Delete ? Json("{}") :
+                Json("{}", Interlocked.Increment(ref heartbeats) == 1 ? HttpStatusCode.Unauthorized : HttpStatusCode.OK)
+        }));
+        var vm = new MiscViewModel(null!) { NewSpoofingID = "222" };
+        InjectApi(vm, api);
+        vm.RecoverAuthAsync = () => { entered.TrySetResult(); return recovery.Task; };
+        vm.AuthRecoveryTimeout = TimeSpan.FromSeconds(3);
+
+        try
+        {
+            var running = vm.SpooferButtonClickedCommand.ExecuteAsync(null);
+            await entered.Task.WaitAsync(TimeSpan.FromSeconds(3));
+            await vm.SpooferButtonClickedCommand.ExecuteAsync(null);
+            HomeViewModel.XAUTH = "XBL3.0 x=1;synthetic-refreshed";
+            HomeViewModel.XAUTHTested = true;
+            recovery.SetResult(true);
+            await running.WaitAsync(TimeSpan.FromSeconds(3));
+            Assert.Equal(1, Volatile.Read(ref heartbeats));
+            Assert.Equal(0, HomeViewModel.SpoofingStatus);
+            Assert.Equal("Spoofing Not Started", vm.SpoofingText);
+        }
+        finally
+        {
+            HomeViewModel._isLoggedIn = false;
+        }
     }
 
     [Fact]

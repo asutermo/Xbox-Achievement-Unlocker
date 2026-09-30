@@ -212,6 +212,10 @@ namespace XAU.ViewModels.Pages
         private CancellationTokenSource? _spoofCts;
         private bool _stoppingHeartbeat;
         internal Func<TimeSpan, CancellationToken, Task> HeartbeatDelayAsync { get; set; } = Task.Delay;
+        internal Func<Task<bool>> RecoverAuthAsync { get; set; } = () =>
+            HomeViewModel.Instance?.TryRecoverAuthAsync() ?? Task.FromResult(false);
+        internal Func<TimeSpan, CancellationToken, Task> AuthRecoveryDelayAsync { get; set; } = Task.Delay;
+        internal TimeSpan AuthRecoveryTimeout { get; set; } = TimeSpan.FromSeconds(60);
 
         [RelayCommand(AllowConcurrentExecutions = true)]
         public async Task SpooferButtonClicked()
@@ -421,18 +425,25 @@ namespace XAU.ViewModels.Pages
         private async Task Spoofing(CancellationTokenSource run, string titleId, string titleName)
         {
             var watch = Stopwatch.StartNew();
+            string xuid = HomeViewModel.XUIDOnly;
             int failures = 0;
+            bool attemptedAuthRecovery = false;
             TimeSpan nextHeartbeat = TimeSpan.Zero;
             try
             {
                 while (IsCurrentRun(run))
                 {
+                    if (HomeViewModel.XUIDOnly != xuid)
+                    {
+                        AbortSpoofing(run, "Spoofing Stopped: signed-in account changed.");
+                        break;
+                    }
                     if (watch.Elapsed >= nextHeartbeat)
                     {
                         try
                         {
                             // Cancel transport and loop; a request already sent may still land.
-                            await _xboxRestAPI.Value.SendHeartbeatAsync(HomeViewModel.XUIDOnly, titleId, run.Token)
+                            await _xboxRestAPI.Value.SendHeartbeatAsync(xuid, titleId, run.Token)
                                 .WaitAsync(run.Token);
                             if (!IsCurrentRun(run))
                                 break;
@@ -447,11 +458,48 @@ namespace XAU.ViewModels.Pages
                         {
                             if (!IsCurrentRun(run))
                                 break;
-                            failures++;
-                            DiagLog.Write($"[SPOOF] heartbeat failed ({failures} consecutive): {ex.GetType().Name}: {ex.Message}");
                             var status = (ex as HttpRequestException)?.StatusCode;
                             if (status == HttpStatusCode.Unauthorized)
-                                HomeViewModel.Instance?.StartAuthRecovery();
+                            {
+                                if (attemptedAuthRecovery)
+                                {
+                                    AbortSpoofing(run, "Spoofing Stopped: refreshed token was also rejected (401).");
+                                    break;
+                                }
+                                attemptedAuthRecovery = true;
+                                string rejectedToken = HomeViewModel.XAUTH;
+                                SpoofingText = "Spoofing paused: Refreshing authentication...";
+                                bool refreshed = false;
+                                try
+                                {
+                                    refreshed = await SpoofAuthRecovery.WaitForFreshTokenAsync(
+                                        RecoverAuthAsync,
+                                        () => HomeViewModel._isLoggedIn && HomeViewModel.XAUTHTested &&
+                                            HomeViewModel.XAUTH != rejectedToken && HomeViewModel.XUIDOnly == xuid,
+                                        AuthRecoveryTimeout, run.Token, AuthRecoveryDelayAsync);
+                                }
+                                catch (OperationCanceledException) when (run.IsCancellationRequested)
+                                {
+                                    break;
+                                }
+                                catch (Exception recoveryError)
+                                {
+                                    DiagLog.Write($"[SPOOF] auth recovery failed: {recoveryError.GetType().Name}");
+                                }
+                                if (!IsCurrentRun(run))
+                                    break;
+                                if (!refreshed)
+                                {
+                                    AbortSpoofing(run, "Spoofing Stopped: authentication did not refresh in time. Re-spoof after login.");
+                                    break;
+                                }
+                                failures = 0;
+                                nextHeartbeat = watch.Elapsed;
+                                continue;
+                            }
+
+                            failures++;
+                            DiagLog.Write($"[SPOOF] heartbeat failed ({failures} consecutive): {ex.GetType().Name}: {ex.Message}");
                             if (status == HttpStatusCode.Forbidden)
                                 DiagLog.Write("[SPOOF] heartbeat 403 Forbidden: presence rejected this request; authorization cause is not established.");
                             if (status == HttpStatusCode.Forbidden || failures >= 3)

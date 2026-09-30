@@ -865,6 +865,22 @@ namespace XAU.ViewModels.Pages
         private DateTime _lastAuthRecoveryUtc = DateTime.MinValue;
         private static readonly TimeSpan AuthRecoveryCooldown = TimeSpan.FromMinutes(2);
 
+        // A heartbeat 401 can arrive before the periodic profile probe marks the held token
+        // invalid. Memory-scan replacements must be profile-tested on the short signed-out
+        // cadence before a waiting spoofer resumes.
+        internal void MarkSessionRejected()
+        {
+            lock (_authStateLock)
+            {
+                // An earlier profile probe can still be in flight for the rejected token.
+                // Discard its result instead of letting it mark that token logged in again.
+                Interlocked.Increment(ref _authGeneration);
+                IsLoggedIn = false;
+                XAUTHTested = false;
+                _lastXauthTestUtc = DateTime.MinValue;
+            }
+        }
+
         /// <summary>
         /// Attempts silent token re-acquisition after a 401. Returns true only after SISU has issued
         /// a new XAUTH (OAuth path); endpoint-specific authorization is still checked separately.
@@ -891,9 +907,10 @@ namespace XAU.ViewModels.Pages
                 if (Settings.OAuthLogin)
                     return await TryRecoverOAuthAsync();
 
-                // Memory-scan mode: force a scan right now instead of waiting for the next interval,
-                // and make sure a manual-token choice doesn't block the rescan.
+                // Memory-scan mode: force a scan and profile-test its replacement before
+                // another heartbeat can reuse a token merely found in process memory.
                 DiagLog.Write("[AUTHRECOVERY] token rejected (401); forcing immediate XAUTH memory re-scan");
+                MarkSessionRejected();
                 SettingsViewModel.ManualXauth = false;
                 _lastXauthScanUtc = DateTime.MinValue;
                 GetXAUTH();

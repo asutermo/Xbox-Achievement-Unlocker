@@ -11,6 +11,7 @@ using Wpf.Ui.Controls;
 using Wpf.Ui.Common;
 using Wpf.Ui.Contracts;
 using Wpf.Ui.Services;
+using XAU.Util.Diagnostics;
 using XAU.Util.Logging;
 using XAU.Views.Pages;
 
@@ -57,6 +58,10 @@ namespace XAU.ViewModels.Pages
         public static bool SpoofingUpdate = false;
         private CancellationTokenSource? _autoSpoofCts;
         internal Func<TimeSpan, CancellationToken, Task> AutoSpoofDelayAsync { get; set; } = Task.Delay;
+        internal Func<Task<bool>> RecoverAuthAsync { get; set; } = () =>
+            HomeViewModel.Instance?.TryRecoverAuthAsync() ?? Task.FromResult(false);
+        internal Func<TimeSpan, CancellationToken, Task> AuthRecoveryDelayAsync { get; set; } = Task.Delay;
+        internal TimeSpan AuthRecoveryTimeout { get; set; } = TimeSpan.FromSeconds(60);
         private bool IsFiltered = false;
         private bool IsEventBased = false;
         private dynamic EventsData = (dynamic)(new JObject());
@@ -260,18 +265,27 @@ namespace XAU.ViewModels.Pages
             _autoSpoofCts = run;
             SpoofingUpdate = false;
             string titleId = HomeViewModel.AutoSpoofedTitleID;
+            string xuid = HomeViewModel.XUIDOnly;
+            bool attemptedAuthRecovery = false;
             int seconds = 300;
             try
             {
                 while (IsAutoRun(run) && !SpoofingUpdate)
                 {
+                    if (HomeViewModel.XUIDOnly != xuid)
+                    {
+                        StopAutoSpoof(run, "Auto Spoofing Stopped: signed-in account changed");
+                        break;
+                    }
                     if (seconds >= 300)
                     {
                         seconds = 0;
                         try
                         {
-                            await _xboxRestAPI.Value.SendHeartbeatAsync(HomeViewModel.XUIDOnly, titleId, run.Token)
+                            await _xboxRestAPI.Value.SendHeartbeatAsync(xuid, titleId, run.Token)
                                 .WaitAsync(run.Token);
+                            if (attemptedAuthRecovery && IsAutoRun(run))
+                                GameInfo = "Auto Spoofing";
                         }
                         catch (OperationCanceledException) when (run.IsCancellationRequested)
                         {
@@ -284,7 +298,42 @@ namespace XAU.ViewModels.Pages
                             var status = (ex as HttpRequestException)?.StatusCode;
                             DiagLog.Write($"[SPOOF] auto-spoof heartbeat failed: {ex.GetType().Name} HTTP {(int?)status ?? 0}: {ex.Message}");
                             if (status == HttpStatusCode.Unauthorized)
-                                HomeViewModel.Instance?.StartAuthRecovery();
+                            {
+                                if (attemptedAuthRecovery)
+                                {
+                                    StopAutoSpoof(run, "Auto Spoofing Stopped: refreshed token was also rejected (401)");
+                                    break;
+                                }
+                                attemptedAuthRecovery = true;
+                                string rejectedToken = HomeViewModel.XAUTH;
+                                GameInfo = "Auto Spoofing paused: Refreshing authentication...";
+                                bool refreshed = false;
+                                try
+                                {
+                                    refreshed = await SpoofAuthRecovery.WaitForFreshTokenAsync(
+                                        RecoverAuthAsync,
+                                        () => HomeViewModel._isLoggedIn && HomeViewModel.XAUTHTested &&
+                                            HomeViewModel.XAUTH != rejectedToken && HomeViewModel.XUIDOnly == xuid,
+                                        AuthRecoveryTimeout, run.Token, AuthRecoveryDelayAsync);
+                                }
+                                catch (OperationCanceledException) when (run.IsCancellationRequested)
+                                {
+                                    break;
+                                }
+                                catch (Exception recoveryError)
+                                {
+                                    DiagLog.Write($"[SPOOF] auto-spoof auth recovery failed: {recoveryError.GetType().Name}");
+                                }
+                                if (!IsAutoRun(run))
+                                    break;
+                                if (!refreshed)
+                                {
+                                    StopAutoSpoof(run, "Auto Spoofing Stopped: authentication did not refresh in time");
+                                    break;
+                                }
+                                seconds = 300; // retry immediately with the new token
+                                continue;
+                            }
                             if (status == HttpStatusCode.Forbidden)
                                 DiagLog.Write("[SPOOF] auto-spoof heartbeat 403 Forbidden: presence rejected request; authorization cause is not established.");
                             StopAutoSpoof(run, status == HttpStatusCode.Forbidden
