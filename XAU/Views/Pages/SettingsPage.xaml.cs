@@ -27,6 +27,7 @@ namespace XAU.Views.Pages
             ViewModel.OnNavigatedToEvent += (_, _) =>
             {
                 XauthTextBox.Text = HomeViewModel.XAUTH;
+                ScanReadLengthBox.Text = HomeViewModel.ScanReadLength.ToString();
                 SyncEventsTokenUI();
             };
 
@@ -88,6 +89,13 @@ namespace XAU.Views.Pages
             HomeViewModel.XAUTH = XauthTextBox.Text;
             SettingsViewModel.ManualXauth = true;
             HomeViewModel.XAUTHTested = false;
+        }
+
+        private void ScanReadLengthBox_OnTextChanged(object sender, TextChangedEventArgs e)
+        {
+            // Validation/clamping/persistence all live in the VM (testable); the box just forwards the raw
+            // text so a half-typed value never overwrites the committed one.
+            ViewModel.OnScanReadLengthTextChanged(ScanReadLengthBox.Text);
         }
 
         private void EventsToken_OnTextChanged(object sender, TextChangedEventArgs e)

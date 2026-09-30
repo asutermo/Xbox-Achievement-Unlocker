@@ -266,4 +266,118 @@ public class XauthScanTests
     }
 
     #endregion
+
+    #region Best-candidate selection (regression: empty string outranks the real token -> can't log in)
+
+    private const string Valid = "XBL3.0 x=1234567890;alive";
+
+    [Fact]
+    public void SelectBestScannedToken_IgnoresEmpty_AndPicksMostFrequentNonEmpty()
+    {
+        // The exact reported shape: many unreadable addresses read back as "" (highest count), the real
+        // token appears less often. The old top-1 pick chose "" and blocked adoption.
+        var frequency = new Dictionary<string, int>
+        {
+            [""] = 7,
+            [Valid] = 4,
+            ["XBL3.0 x=2;b"] = 2,
+        };
+
+        string best = HomeViewModel.SelectBestScannedToken(frequency, out int bestFreq);
+
+        Assert.Equal(Valid, best);
+        Assert.Equal(4, bestFreq);
+    }
+
+    [Fact]
+    public void SelectBestScannedToken_EmptyTopCandidate_StillAdoptableByShouldAdopt()
+    {
+        // End-to-end style assertion: with an empty string topping the frequency table, the real token is
+        // now the one handed to ShouldAdoptScannedToken and IS adopted (was the login blocker).
+        var frequency = new Dictionary<string, int> { [""] = 10, [Valid] = 4 };
+
+        string best = HomeViewModel.SelectBestScannedToken(frequency, out int bestFreq);
+
+        Assert.Equal(Valid, best);
+        Assert.True(HomeViewModel.ShouldAdoptScannedToken(best, string.Empty, bestFreq));
+    }
+
+    [Fact]
+    public void SelectBestScannedToken_AllEmptyOrNull_ReturnsEmptyZero()
+    {
+        var frequency = new Dictionary<string, int> { [""] = 5, ["   "] = 3 };
+
+        Assert.Equal("", HomeViewModel.SelectBestScannedToken(frequency, out int f1));
+        Assert.Equal(0, f1);
+
+        Assert.Equal("", HomeViewModel.SelectBestScannedToken(null!, out int f2));
+        Assert.Equal(0, f2);
+    }
+
+    [Fact]
+    public void SelectBestScannedToken_Tie_BrokenByLongerString()
+    {
+        var frequency = new Dictionary<string, int> { ["short"] = 3, ["longertoken"] = 3 };
+
+        string best = HomeViewModel.SelectBestScannedToken(frequency, out int bestFreq);
+
+        Assert.Equal("longertoken", best);
+        Assert.Equal(3, bestFreq);
+    }
+
+    #endregion
+
+    #region Scan read-length tunable (default 16384; floor guards against truncation-into-400)
+
+    [Theory]
+    // The hazard this whole tunable must defend against: a length BELOW the real token size truncates a
+    // valid token, so TestXAUTH reads a malformed string and gets a 400 -- which looks like an invalid
+    // token but is really a read bug. The floor must therefore stay above any genuine token, and any
+    // user-typed value below it is clamped up rather than honoured.
+    [InlineData(0, HomeViewModel.MinScanReadLength)]
+    [InlineData(-5, HomeViewModel.MinScanReadLength)]
+    [InlineData(1024, HomeViewModel.MinScanReadLength)]
+    [InlineData(2000, HomeViewModel.MinScanReadLength)]
+    public void NormalizeScanReadLength_ClampsTooLowUpToFloor(int input, int expected)
+    {
+        Assert.Equal(expected, HomeViewModel.NormalizeScanReadLength(input));
+    }
+
+    [Fact]
+    public void NormalizeScanReadLength_ClampsTooHighUpToCeiling()
+    {
+        Assert.Equal(HomeViewModel.MaxScanReadLength, HomeViewModel.NormalizeScanReadLength(9_000_000));
+    }
+
+    [Fact]
+    public void NormalizeScanReadLength_PreservesInBandValue()
+    {
+        Assert.Equal(HomeViewModel.DefaultScanReadLength,
+            HomeViewModel.NormalizeScanReadLength(HomeViewModel.DefaultScanReadLength));
+    }
+
+    [Theory]
+    [InlineData(0, false)]
+    [InlineData(-1, false)]
+    [InlineData(HomeViewModel.MinScanReadLength - 1, false)]
+    [InlineData(HomeViewModel.MinScanReadLength, true)]
+    [InlineData(HomeViewModel.DefaultScanReadLength, true)]
+    [InlineData(HomeViewModel.MaxScanReadLength, true)]
+    [InlineData(HomeViewModel.MaxScanReadLength + 1, false)]
+    public void ShouldAcceptScanReadLength_EnforcesInclusiveBand(int candidate, bool expected)
+    {
+        Assert.Equal(expected, HomeViewModel.ShouldAcceptScanReadLength(candidate));
+    }
+
+    [Fact]
+    // The floor is only a real safety floor if it clears the largest token actually seen. The one
+    // genuine token observed in the field was ~2581 chars; the default/floor must dominate it.
+    public void FloorAndDefault_ClearTheLargestObservedToken()
+    {
+        int largestObservedToken = 2581; // from the live log: "[XAUTHDBG] TestXAUTH: verifying token (len=2581)"
+        Assert.True(HomeViewModel.MinScanReadLength > largestObservedToken);
+        Assert.True(HomeViewModel.DefaultScanReadLength > largestObservedToken);
+    }
+
+    #endregion
 }

@@ -3,6 +3,7 @@ using System.Diagnostics;
 using System.IO;
 using Wpf.Ui.Controls;
 using XAU.Services.HttpServer;
+using XAU.Util.Logging;
 
 namespace XAU.ViewModels.Pages
 {
@@ -28,6 +29,8 @@ namespace XAU.ViewModels.Pages
         [ObservableProperty] private bool _privacyMode;
         [ObservableProperty] private bool _oAuthLogin;
         [ObservableProperty] private bool _autoGrabEventsToken;
+        [ObservableProperty] private bool _enableDiagnosticsLog;
+        [ObservableProperty] private int _xauthScanReadLength = 16384;
         [ObservableProperty] private string _xauth;
 
         [ObservableProperty] private bool _serverEnabled;
@@ -56,11 +59,53 @@ namespace XAU.ViewModels.Pages
                 UseAcrylic = UseAcrylic,
                 PrivacyMode = PrivacyMode,
                 OAuthLogin = OAuthLogin,
-                AutoGrabEventsToken = AutoGrabEventsToken
+                AutoGrabEventsToken = AutoGrabEventsToken,
+                EnableDiagnosticsLog = EnableDiagnosticsLog,
+                XauthScanReadLength = XauthScanReadLength,
+                // Preserve the persisted events token + its provenance. These are not settings-page
+                // fields, and rebuilding XAUSettings without them meant EVERY SaveSettings click
+                // silently deleted the cached events token (and its obtained-at timestamp) from
+                // settings.json -- cached tokens "never persisted" across a save.
+                CachedEventsToken = HomeViewModel.Settings.CachedEventsToken,
+                EventsTokenObtainedAt = HomeViewModel.Settings.EventsTokenObtainedAt,
+                EventsUserHash = HomeViewModel.Settings.EventsUserHash
             };
             string settingsJson = JsonConvert.SerializeObject(settings);
-            File.WriteAllText(SettingsFilePath, settingsJson);
-            HomeViewModel.Settings = settings; // update ref
+            // Assign the new Settings object BEFORE the file write, inside the lock: PersistEventsToken
+            // serialises whichever object Settings references and writes under the same lock, so the
+            // assignment must already point at the fresh object or a concurrent token persist could
+            // re-write the stale one right after our save.
+            lock (HomeViewModel.SettingsWriteLock)
+            {
+                HomeViewModel.Settings = settings; // update ref
+                File.WriteAllText(SettingsFilePath, settingsJson);
+            }
+            // Apply the just-saved choice immediately so turning logging off takes effect without a restart.
+            DiagLog.Enabled = EnableDiagnosticsLog;
+            // Live-apply the scan read length too, so the very next token scan uses it (no restart needed).
+            HomeViewModel.ScanReadLength = HomeViewModel.NormalizeScanReadLength(XauthScanReadLength);
+        }
+
+        /// <summary>
+        /// Called by the Settings "Token Scan Read Length" box on each edit. Ignores non-numeric/transient
+        /// text (so the committed value is never clobbered mid-type), clamps into the acceptable band,
+        /// live-applies to HomeViewModel.ScanReadLength (the next scan uses it, no restart), and persists.
+        /// A no-op when unchanged, so populating the box on load writes nothing.
+        /// </summary>
+        public void OnScanReadLengthTextChanged(string text)
+        {
+            if (!int.TryParse(text,
+                    System.Globalization.NumberStyles.Integer,
+                    System.Globalization.CultureInfo.InvariantCulture, out int parsed))
+                return;
+
+            int normalized = HomeViewModel.NormalizeScanReadLength(parsed);
+            if (HomeViewModel.ScanReadLength == normalized && XauthScanReadLength == normalized)
+                return;
+
+            XauthScanReadLength = normalized;
+            HomeViewModel.ScanReadLength = normalized;
+            SaveSettings();
         }
 
         [RelayCommand]
@@ -178,6 +223,8 @@ namespace XAU.ViewModels.Pages
             Xauth = HomeViewModel.XAUTH;
             OAuthLogin = HomeViewModel.Settings.OAuthLogin;
             AutoGrabEventsToken = HomeViewModel.Settings.AutoGrabEventsToken;
+            EnableDiagnosticsLog = HomeViewModel.Settings.EnableDiagnosticsLog;
+            XauthScanReadLength = HomeViewModel.Settings.XauthScanReadLength;
         }
 
         private string GetAssemblyVersion()

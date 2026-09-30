@@ -12,6 +12,11 @@ public class XAUSettings
     public bool PrivacyMode { get; set; }
     public bool OAuthLogin { get; set; }
     public bool AutoGrabEventsToken { get; set; }
+    // Default ON (initializer): an existing settings.json that predates this key is deserialised into
+    // a fresh object, Newtonsoft only overwrites keys present in the JSON, so a missing key keeps
+    // this true -- diagnostics stay on until the user opts out via the Settings toggle.
+    public bool EnableDiagnosticsLog { get; set; } = true;
+    public int XauthScanReadLength { get; set; } = 16384;
     public string? CachedEventsToken { get; set; }
     public DateTime? EventsTokenObtainedAt { get; set; }
     public string? EventsUserHash { get; set; }

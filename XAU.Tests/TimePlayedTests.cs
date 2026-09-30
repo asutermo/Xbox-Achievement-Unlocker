@@ -94,4 +94,47 @@ public class TimePlayedTests
         Assert.Contains("[1][0]", dump);
         Assert.Contains("14512", dump);
     }
+
+    #region Fallback: figure in Properties / GroupProperties, whitespace tolerance
+
+    [Fact]
+    // The likely real-world shape behind a spurious "Unknown": MinutesPlayed present but Value null,
+    // with the number surfacing via Properties. Must be read, not reported Unknown.
+    public void MinutesPlayed_NullValue_FallsBackToProperties()
+    {
+        var st = new Stat { Name = "MinutesPlayed", Value = null };
+        st.Properties["value"] = "24512";
+        var response = Response(List(st));
+        Assert.Equal(24512d, MiscViewModel.GetMinutesPlayed(response));
+    }
+
+    [Fact]
+    // Same, but surfaced via GroupProperties.
+    public void MinutesPlayed_NullValue_FallsBackToGroupProperties()
+    {
+        var st = new Stat { Name = "MinutesPlayed", Value = null };
+        st.GroupProperties["minutesPlayed"] = "14512";
+        var response = Response(List(st));
+        Assert.Equal(14512d, MiscViewModel.GetMinutesPlayed(response));
+    }
+
+    [Fact]
+    // The name gate must hold even for the fallback: a Gamerscore stat carrying numeric Properties must
+    // NOT be harvested as play-time. (This is the guard against re-introducing the [0][0] bug.)
+    public void NonMinutesPlayed_WithNumericProperties_IsStillIgnored()
+    {
+        var gs = new Stat { Name = "Gamerscore", Value = null };
+        gs.Properties["value"] = "9000";
+        var response = Response(List(gs));
+        Assert.Equal(-1d, MiscViewModel.GetMinutesPlayed(response));
+    }
+
+    [Fact]
+    public void MinutesPlayed_LeadingTrailingWhitespace_IsParsed()
+    {
+        var response = Response(List(Stat("  MinutesPlayed  ", "  24512  ")));
+        Assert.Equal(24512d, MiscViewModel.GetMinutesPlayed(response));
+    }
+
+    #endregion
 }
