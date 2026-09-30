@@ -16,6 +16,7 @@ namespace XAU.Views.Pages
         private readonly DispatcherTimer _tokenRefreshTimer;
         private string _lastKnownEventsToken;
         private bool _manualScanInProgress;
+        private bool _clearingAuthUi;
 
         public SettingsPage(SettingsViewModel viewModel, ISnackbarService snackbarService, HomeViewModel homeViewModel)
         {
@@ -75,6 +76,8 @@ namespace XAU.Views.Pages
 
         private void XauthTextBox_OnTextChanged(object sender, TextChangedEventArgs e)
         {
+            if (_clearingAuthUi)
+                return;
             if (string.IsNullOrWhiteSpace(XauthTextBox.Text) || string.IsNullOrEmpty(XauthTextBox.Text))
             {
                 _snackbarService.Show(
@@ -218,17 +221,29 @@ namespace XAU.Views.Pages
 
         private void ClearAuthCacheButton_OnClick(object sender, RoutedEventArgs e)
         {
-            _homeViewModel.ClearAuthCache();
+            bool cleared = _homeViewModel.ClearAuthCache();
+            // Clearing auth changes HomeViewModel.Settings while this page remains open. Refresh
+            // the bound settings so another toggle cannot save the old OAuthLogin = true value.
+            ViewModel.RefreshAfterAuthCacheCleared();
 
-            // Reset UI fields that display cached auth state
-            XauthTextBox.Text = string.Empty;
-            SyncEventsTokenUI();
+            _clearingAuthUi = true;
+            try
+            {
+                XauthTextBox.Text = string.Empty;
+                SyncEventsTokenUI();
+            }
+            finally
+            {
+                _clearingAuthUi = false;
+            }
 
             _snackbarService.Show(
-                "Auth Cache Cleared",
-                "All tokens have been deleted. Log in again from the Home page.",
-                ControlAppearance.Success,
-                new SymbolIcon(SymbolRegular.Checkmark24));
+                cleared ? "Auth Cache Cleared" : "Auth Cache Not Fully Cleared",
+                cleared
+                    ? "All tokens have been deleted. Log in again from the Home page."
+                    : "Some cached authentication data could not be deleted or saved. Check file permissions and try again.",
+                cleared ? ControlAppearance.Success : ControlAppearance.Caution,
+                new SymbolIcon(cleared ? SymbolRegular.Checkmark24 : SymbolRegular.Warning24));
         }
     }
 }

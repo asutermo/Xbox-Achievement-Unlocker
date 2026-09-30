@@ -42,12 +42,12 @@ namespace XAU.ViewModels.Pages
         [ObservableProperty] private List<string> _xboxServiceStatusLines = new List<string>();
 
         /// <summary>
-        /// Probes the Xbox Live endpoints we actually use and classifies each reply. Any HTTP answer
-        /// (2xx-4xx) means "Xbox is awake; a 0h/'Unknown' is our token/data"; only a 5xx or an
-        /// unreachable endpoint points at a Microsoft-side outage.
+        /// Probes Xbox Live endpoint reachability without authentication. An HTTP response
+        /// does not prove that the token can read stats or write presence; a timeout may also be
+        /// caused by the user's network rather than the service.
         /// </summary>
         [RelayCommand]
-        private async void CheckXboxServiceHealth()
+        private async Task CheckXboxServiceHealth()
         {
             if (IsCheckingXboxServiceHealth)
                 return;
@@ -59,12 +59,12 @@ namespace XAU.ViewModels.Pages
                 XboxServiceStatusLines = XblServiceHealth.StatusLines(report.Results);
                 if (report.LooksLikeServiceOutage)
                     _snackbarService.Show("Xbox Live status",
-                        "Some Xbox Live services are DOWN/unreachable -- this looks like an Xbox-side problem, not XAU.",
+                        "A service errored or could not be reached. This could be Xbox Live or your local network.",
                         ControlAppearance.Caution, new SymbolIcon(SymbolRegular.Warning24), _snackbarDuration);
                 else
                     _snackbarService.Show("Xbox Live status",
-                        "Xbox Live services are healthy. A 0h/'Unknown' profile here is an account/token issue, not an outage.",
-                        ControlAppearance.Success, new SymbolIcon(SymbolRegular.Checkmark24), _snackbarDuration);
+                        "Endpoints responded to unauthenticated checks. This does not verify login, stats or presence writes.",
+                        ControlAppearance.Info, new SymbolIcon(SymbolRegular.Info24), _snackbarDuration);
             }
             catch (Exception ex)
             {
@@ -207,27 +207,29 @@ namespace XAU.ViewModels.Pages
         private GameTitle GameInfoResponse;
         private GameStatsResponse GameStatsResponse;
 
-        // Per-loop cancellation. The old shared `SpoofingUpdate` bool was both the stop signal and the
-        // "new loop initializes me to false" signal, so a quick Stop->Start could have the old loop
-        // miss its stop (it sleeps up to 1s between checks) while the new run re-arms the flag --
-        // leaving TWO heartbeat loops fighting over presence (two titles alternating every 5 min),
-        // which is one way a spoof "doesn't persist". A CTS per spoof run cannot be resurrected.
+        // A run owns its fetches, UI updates and heartbeats from the first button click onward.
+        // In particular, a pending title fetch must not be mistaken for an idle spoofer.
         private CancellationTokenSource? _spoofCts;
-        private int _heartbeatFailureCount;
+        private bool _stoppingHeartbeat;
+        internal Func<TimeSpan, CancellationToken, Task> HeartbeatDelayAsync { get; set; } = Task.Delay;
 
-        [RelayCommand]
+        [RelayCommand(AllowConcurrentExecutions = true)]
         public async Task SpooferButtonClicked()
         {
-            if (CurrentlySpoofing)
+            if (_stoppingHeartbeat)
+                return;
+
+            if (_spoofCts is not null)
             {
-                // Cancelling the CTS actually terminates the spoof loop; the old `SpoofingUpdate = true`
-                // raced with a concurrently-starting loop re-arming the same flag.
-                _spoofCts?.Cancel();
+                var run = _spoofCts;
+                bool hadStarted = CurrentlySpoofing;
+                run.Cancel();
+                _spoofCts = null;
                 CurrentlySpoofing = false;
-                HomeViewModel.SpoofedTitleID = "0";
+                if (hadStarted)
+                    HomeViewModel.SpoofedTitleID = "0";
                 SpoofingText = "Spoofing Not Started";
                 SpoofingButtonText = "Start Spoofing";
-                //reset game info
                 GameName = "Name: ";
                 GameTitleID = "Title ID: ";
                 GamePFN = "PFN: ";
@@ -237,25 +239,32 @@ namespace XAU.ViewModels.Pages
                 GameGamerscore = "Gamerscore: ?/?";
                 GameImage = "pack://application:,,,/Assets/cirno.png";
                 GameTime = "Time Played: ";
-                HomeViewModel.SpoofingStatus = 0;
-                try
+                // Cancelling before the fetch completed must leave an existing auto-spoof intact.
+                if (hadStarted)
                 {
-                    await _xboxRestAPI.Value.StopHeartbeatAsync(HomeViewModel.XUIDOnly);
+                    HomeViewModel.SpoofingStatus = 0;
                 }
-                catch (Exception)
+                // No manual presence exists if the info fetch hasn't finished yet.
+                if (hadStarted)
                 {
+                    _stoppingHeartbeat = true;
+                    try
+                    {
+                        await _xboxRestAPI.Value.StopHeartbeatAsync(HomeViewModel.XUIDOnly);
+                    }
+                    catch (Exception ex)
+                    {
+                        DiagLog.Write($"[SPOOF] stop heartbeat failed: {ex.GetType().Name}: {ex.Message}");
+                    }
+                    finally
+                    {
+                        _stoppingHeartbeat = false;
+                    }
                 }
                 return;
             }
-            HomeViewModel.SpoofedTitleID = NewSpoofingID;
 
-            if (HomeViewModel.SpoofingStatus == 2)
-            {
-                HomeViewModel.SpoofingStatus = 1;
-                AchievementsViewModel.SpoofingUpdate = true;
-            }
-            HomeViewModel.SpoofingStatus = 1;
-            SpoofGame();
+            await SpoofGame();
         }
 
         /// <summary>
@@ -263,59 +272,63 @@ namespace XAU.ViewModels.Pages
         /// need): cancels the loop, resets the spoofing state, and shows WHY it stopped so the UI no
         /// longer claims a spoof is alive that has actually lapsed.
         /// </summary>
-        private void AbortSpoofing(string reason)
+        private bool IsCurrentRun(CancellationTokenSource run) =>
+            ReferenceEquals(_spoofCts, run) && !run.IsCancellationRequested;
+
+        private void AbortSpoofing(CancellationTokenSource run, string reason)
         {
-            _spoofCts?.Cancel();
+            if (!IsCurrentRun(run))
+                return;
+            bool hadStarted = CurrentlySpoofing;
+            run.Cancel();
+            _spoofCts = null;
             CurrentlySpoofing = false;
-            HomeViewModel.SpoofingStatus = 0;
-            HomeViewModel.SpoofedTitleID = "0";
+            if (hadStarted)
+            {
+                HomeViewModel.SpoofingStatus = 0;
+                HomeViewModel.SpoofedTitleID = "0";
+            }
             SpoofingText = reason;
             SpoofingButtonText = "Start Spoofing";
             DiagLog.Write($"[SPOOF] aborted: {reason}");
         }
 
-        public async void SpoofGame()
+        public async Task SpoofGame()
         {
-            CurrentSpoofingID = NewSpoofingID;
+            if (_spoofCts is not null || _stoppingHeartbeat)
+                return;
 
-            // Kill any previous spoof loop BEFORE the network fetches below. The old code cancelled
-            // only at the END of this method, so a previous run (its heartbeats AND its UI text for
-            // the OLD game) stayed alive for the whole fetch window -- a stop/start shuffle could
-            // then show "Spoofing <old game>" while heartbeats went to the new title.
-            _spoofCts?.Cancel();
-            var spoofCts = new CancellationTokenSource();
-            _spoofCts = spoofCts;
-            _heartbeatFailureCount = 0;
-
+            string titleId = NewSpoofingID;
+            var run = new CancellationTokenSource();
+            _spoofCts = run; // reserve the run before either info fetch can yield
+            CurrentSpoofingID = titleId;
             try
             {
-                GameInfoResponse = await _xboxRestAPI.Value.GetGameTitleAsync(HomeViewModel.XUIDOnly, NewSpoofingID);
-                GameStatsResponse = await _xboxRestAPI.Value.GetGameStatsAsync(HomeViewModel.XUIDOnly, NewSpoofingID);
-            }
-            catch (Exception ex)
-            {
-                _snackbarService.Show("Error: Unable to acquire game info or stats",
-                    $"The request failed: {ex.Message}",
-                    ControlAppearance.Danger,
-                    new SymbolIcon(SymbolRegular.ErrorCircle24), _snackbarDuration);
-                AbortSpoofing("Spoofing Not Started");
-                return;
-            }
+                // These API methods have no cancellation overload. An old completion must be
+                // ignored, including when Stop -> Start happens during a pending fetch.
+                var gameInfo = await _xboxRestAPI.Value.GetGameTitleAsync(HomeViewModel.XUIDOnly, titleId);
+                if (!IsCurrentRun(run))
+                    return;
+                var gameStats = await _xboxRestAPI.Value.GetGameStatsAsync(HomeViewModel.XUIDOnly, titleId);
+                if (!IsCurrentRun(run))
+                    return;
 
-            if (GameInfoResponse == null || GameStatsResponse == null || !GameInfoResponse.Titles.Any())
-            {
-                _snackbarService.Show("Error: Unable to acquire game info or stats",
-                    $"The game info was invalid.",
-                    ControlAppearance.Danger,
-                    new SymbolIcon(SymbolRegular.ErrorCircle24), _snackbarDuration);
-                AbortSpoofing("Spoofing Not Started");
-                return;
-            }
+                if (gameInfo?.Titles?.Any() != true || gameStats is null)
+                {
+                    _snackbarService.Show("Error: Unable to acquire game info or stats",
+                        "The game info was invalid.", ControlAppearance.Danger,
+                        new SymbolIcon(SymbolRegular.ErrorCircle24), _snackbarDuration);
+                    AbortSpoofing(run, "Spoofing Not Started");
+                    return;
+                }
+                GameInfoResponse = gameInfo;
+                GameStatsResponse = gameStats;
 
             try
             {
                 GameName = "Name: " + GameInfoResponse.Titles[0].Name;
-                GameImage = !string.IsNullOrEmpty(GameInfoResponse.Titles[0].DisplayImage.ToString()) ? GameInfoResponse.Titles[0].DisplayImage.ToString() : "pack://application:,,,/Assets/cirno.png";
+                GameImage = string.IsNullOrWhiteSpace(GameInfoResponse.Titles[0].DisplayImage)
+                    ? "pack://application:,,,/Assets/cirno.png" : GameInfoResponse.Titles[0].DisplayImage;
                 GameTitleID = "Title ID: " + GameInfoResponse.Titles[0].TitleId;
                 GamePFN = "PFN: " + GameInfoResponse.Titles[0].Pfn;
                 GameType = "Type: " + GameInfoResponse.Titles[0].Type;
@@ -335,7 +348,7 @@ namespace XAU.ViewModels.Pages
                 // TrueAchievements (which selects by statistic + takes the aggregate) showed real time.
                 // Select by statistic NAME across every bucket and keep the largest -- the all-time
                 // aggregate always dominates any single slice. See GetMinutesPlayed.
-                DiagLog.Write($"[STATDBG] raw buckets: {DumpStatBuckets(GameStatsResponse)}");
+                DiagLog.Write($"[STATDBG] stat-list count={GameStatsResponse?.StatListsCollection?.Count ?? 0}");
                 double minutesPlayed = GetMinutesPlayed(GameStatsResponse);
                 if (minutesPlayed >= 0)
                 {
@@ -366,94 +379,105 @@ namespace XAU.ViewModels.Pages
                 }
 
             }
-            catch
-            {
-                GameName = "Name: ";
-                _snackbarService.Show("Error: Invalid TitleID",
-                    $"The TitleID entered is invalid or does not return information from the API",
-                    ControlAppearance.Danger,
-                    new SymbolIcon(SymbolRegular.ErrorCircle24), _snackbarDuration);
-                return;
-            }
-
-            // Freeze the display name for THIS run. The loop below must never read the shared
-            // GameInfoResponse/GameName fields: they belong to whatever run last wrote them, and any
-            // interleaving (fast stop/start, aborted fetch) made the old run's name bleed into the
-            // new run's text ("says Diablo 4 while spoofing Destiny").
-            string spoofedName = GameInfoResponse.Titles[0].Name;
-
-            CurrentlySpoofing = true;
-            SpoofingButtonText = "Stop Spoofing";
-            SpoofingText = $"Spoofing {spoofedName}";
-            DiagLog.Write($"[SPOOF] starting spoof loop: titleId={CurrentSpoofingID} name={spoofedName}");
-            await Task.Run(() => Spoofing(spoofCts.Token, spoofedName));
-
-        }
-
-        /// <summary>
-        /// The manual spoof loop. One CTS token per run (owned by the caller), heartbeat every 300s
-        /// (well inside the 600s presence expiration). Exits cleanly on cancellation.
-        /// TODO: this code seems like it's duplicated in AchievementsViewModel.cs too.
-        /// </summary>
-        public async Task Spoofing(CancellationToken token, string titleName)
-        {
-            Stopwatch stopwatch = new Stopwatch();
-            stopwatch.Start();
-            SpoofingText = $"Spoofing {titleName} For: {stopwatch.Elapsed.ToString(@"hh\:mm\:ss")}";
-            await TrySendHeartbeat();
-            var i = 0;
-            try
-            {
-                while (!token.IsCancellationRequested)
+                catch (Exception ex)
                 {
-                    if (i == 300)
-                    {
-                        await TrySendHeartbeat();
-                        i = 0;
-                    }
-                    else
-                    {
-                        SpoofingText = $"Spoofing {titleName} For: {stopwatch.Elapsed.ToString(@"hh\:mm\:ss")}";
-                        i++;
-                    }
-                    await Task.Delay(1000, token);
-                }
-            }
-            catch (OperationCanceledException)
-            {
-                // Normal stop via SpooferButtonClicked / AbortSpoofing / a newer SpoofGame run.
-            }
-            DiagLog.Write($"[SPOOF] spoof loop for '{titleName}' (titleId={CurrentSpoofingID}) ended.");
-        }
-
-        private async Task TrySendHeartbeat()
-        {
-            try
-            {
-                await _xboxRestAPI.Value.SendHeartbeatAsync(HomeViewModel.XUIDOnly, CurrentSpoofingID);
-                _heartbeatFailureCount = 0;
-            }
-            catch (HttpRequestException ex)
-            {
-                _heartbeatFailureCount++;
-                DiagLog.Write($"[SPOOF] heartbeat failed ({_heartbeatFailureCount} consecutive): {(int?)ex.StatusCode ?? 0} {ex.Message}");
-
-                if (ex.StatusCode == HttpStatusCode.Unauthorized)
-                {
-                    // Token expired mid-spoof: kick silent recovery (OAuth refresh or memory re-scan)
-                    // so a long spoof session can survive a token expiry instead of silently lapsing.
-                    HomeViewModel.Instance?.StartAuthRecovery();
+                    DiagLog.Write($"[SPOOF] invalid game info: {ex.GetType().Name}: {ex.Message}");
+                    GameName = "Name: ";
+                    _snackbarService.Show("Error: Invalid TitleID",
+                        "The TitleID entered is invalid or does not return information from the API",
+                        ControlAppearance.Danger,
+                        new SymbolIcon(SymbolRegular.ErrorCircle24), _snackbarDuration);
+                    AbortSpoofing(run, "Spoofing Not Started");
+                    return;
                 }
 
-                if (_heartbeatFailureCount >= 3)
-                {
-                    AbortSpoofing("Spoofing Stopped: heartbeats failing (auth/network). Re-spoof once logged back in.");
-                }
+                string spoofedName = gameInfo.Titles[0].Name;
+                if (!IsCurrentRun(run))
+                    return;
+                HomeViewModel.SpoofedTitleID = titleId;
+                if (HomeViewModel.SpoofingStatus == 2)
+                    AchievementsViewModel.SpoofingUpdate = true;
+                HomeViewModel.SpoofingStatus = 1;
+                CurrentlySpoofing = true;
+                SpoofingButtonText = "Stop Spoofing";
+                SpoofingText = $"Spoofing {spoofedName}";
+                DiagLog.Write($"[SPOOF] starting spoof loop: titleId={titleId} name={spoofedName}");
+                await Spoofing(run, titleId, spoofedName);
             }
             catch (Exception ex)
             {
-                _heartbeatFailureCount++;
-                DiagLog.Write($"[SPOOF] heartbeat threw {ex.GetType().Name}: {ex.Message}");
+                if (IsCurrentRun(run))
+                {
+                    DiagLog.Write($"[SPOOF] game fetch failed: {ex.GetType().Name}: {ex.Message}");
+                    _snackbarService.Show("Error: Unable to acquire game info or stats",
+                        $"The request failed: {ex.Message}", ControlAppearance.Danger,
+                        new SymbolIcon(SymbolRegular.ErrorCircle24), _snackbarDuration);
+                    AbortSpoofing(run, "Spoofing Not Started");
+                }
+            }
+        }
+
+        /// <summary>Heartbeats use a title ID frozen at start; a stopped run cannot publish UI.</summary>
+        private async Task Spoofing(CancellationTokenSource run, string titleId, string titleName)
+        {
+            var watch = Stopwatch.StartNew();
+            int failures = 0;
+            TimeSpan nextHeartbeat = TimeSpan.Zero;
+            try
+            {
+                while (IsCurrentRun(run))
+                {
+                    if (watch.Elapsed >= nextHeartbeat)
+                    {
+                        try
+                        {
+                            // Cancel transport and loop; a request already sent may still land.
+                            await _xboxRestAPI.Value.SendHeartbeatAsync(HomeViewModel.XUIDOnly, titleId, run.Token)
+                                .WaitAsync(run.Token);
+                            if (!IsCurrentRun(run))
+                                break;
+                            failures = 0;
+                            nextHeartbeat = watch.Elapsed + TimeSpan.FromMinutes(5);
+                        }
+                        catch (OperationCanceledException) when (run.IsCancellationRequested)
+                        {
+                            break;
+                        }
+                        catch (Exception ex)
+                        {
+                            if (!IsCurrentRun(run))
+                                break;
+                            failures++;
+                            DiagLog.Write($"[SPOOF] heartbeat failed ({failures} consecutive): {ex.GetType().Name}: {ex.Message}");
+                            var status = (ex as HttpRequestException)?.StatusCode;
+                            if (status == HttpStatusCode.Unauthorized)
+                                HomeViewModel.Instance?.StartAuthRecovery();
+                            if (status == HttpStatusCode.Forbidden)
+                                DiagLog.Write("[SPOOF] heartbeat 403 Forbidden: presence rejected this request; authorization cause is not established.");
+                            if (status == HttpStatusCode.Forbidden || failures >= 3)
+                            {
+                                AbortSpoofing(run, status == HttpStatusCode.Forbidden
+                                    ? "Spoofing Stopped: heartbeat rejected (403 Forbidden). Check authorization or try another sign-in method."
+                                    : "Spoofing Stopped: heartbeats failing. Check authorization or network and try again.");
+                                break;
+                            }
+                            nextHeartbeat = watch.Elapsed + TimeSpan.FromSeconds(1);
+                        }
+                    }
+
+                    if (!IsCurrentRun(run))
+                        break;
+                    SpoofingText = $"Spoofing {titleName} For: {watch.Elapsed.ToString(@"hh\:mm\:ss")}";
+                    await HeartbeatDelayAsync(TimeSpan.FromSeconds(1), run.Token);
+                }
+            }
+            catch (OperationCanceledException) when (run.IsCancellationRequested)
+            {
+                // Stop or abort.
+            }
+            finally
+            {
+                DiagLog.Write($"[SPOOF] spoof loop for '{titleName}' (titleId={titleId}) ended.");
             }
         }
 

@@ -55,6 +55,8 @@ namespace XAU.ViewModels.Pages
         private Lazy<XboxRestAPI> _xboxRestAPI = new Lazy<XboxRestAPI>(() => new XboxRestAPI(HomeViewModel.XAUTH));
 
         public static bool SpoofingUpdate = false;
+        private CancellationTokenSource? _autoSpoofCts;
+        internal Func<TimeSpan, CancellationToken, Task> AutoSpoofDelayAsync { get; set; } = Task.Delay;
         private bool IsFiltered = false;
         private bool IsEventBased = false;
         private dynamic EventsData = (dynamic)(new JObject());
@@ -191,98 +193,138 @@ namespace XAU.ViewModels.Pages
             }
         }
 
-        // Fire-and-forget from OnNavigatedTo/InitializeViewModel/RefreshAchievements. It stays
-        // `async void` (non-blocking) because Spoofing() polls until a spoof completes, which can
-        // be minutes. It deliberately does NOT swallow unexpected faults: transient network errors
-        // are handled where they occur (TrySendHeartbeat), and the previous
-        // ArgumentOutOfRangeException here was a real bug — a blind Titles[0] read — so it is fixed
-        // at the source via GetFirstTitleName rather than masked with a snackbar. Anything that
-        // still escapes is a genuine defect and should surface to the crash dialog.
-        private async void SpoofGame()
+        // Navigation cannot await a long-lived presence loop. SpoofGameAsync catches its own
+        // faults so a background heartbeat never escapes through async void into the UI dispatcher.
+        private void SpoofGame() => _ = SpoofGameAsync();
+
+        private async Task SpoofGameAsync()
         {
+            try
+            {
+                await RunAutoSpoofAsync();
+            }
+            catch (Exception ex)
+            {
+                DiagLog.Write($"[SPOOF] auto-spoof failed: {ex.GetType().Name}: {ex.Message}");
+                if (HomeViewModel.SpoofingStatus == 2)
+                {
+                    _autoSpoofCts?.Cancel();
+                    _autoSpoofCts = null;
+                    HomeViewModel.SpoofingStatus = 0;
+                    HomeViewModel.AutoSpoofedTitleID = "0";
+                    GameInfo = "Auto Spoofing Stopped: unexpected error";
+                }
+            }
+        }
+
+        private async Task RunAutoSpoofAsync()
+        {
+            _autoSpoofCts?.Cancel();
+            _autoSpoofCts = null;
             if (HomeViewModel.SpoofingStatus == 1)
             {
-                if (HomeViewModel.SpoofedTitleID == TitleIDOverride)
-                {
-                    GameInfo = "Manually Spoofing";
-                    GameName = SpoofedGameName;
-                }
-                else
-                {
-                    GameInfo = "Spoofing Another Game";
-                    GameName = SpoofedGameName;
-                }
+                GameInfo = HomeViewModel.SpoofedTitleID == TitleIDOverride
+                    ? "Manually Spoofing" : "Spoofing Another Game";
+                GameName = SpoofedGameName;
+                return;
             }
-            else
-            {
-                HomeViewModel.AutoSpoofedTitleID = TitleIDOverride;
-                HomeViewModel.SpoofingStatus = 2;
-                GameInfo = "Auto Spoofing";
-                if (GetFirstTitleName(GameInfoResponse) != null)
-                {
-                    GameName = SpoofedGameName;
-                }
 
-                await Task.Run(() => Spoofing());
-                if (HomeViewModel.SpoofingStatus == 1)
-                {
-                    if (HomeViewModel.SpoofedTitleID == HomeViewModel.AutoSpoofedTitleID)
-                    {
-                        GameInfo = "Manually Spoofing";
-                        GameName = SpoofedGameName;
-                    }
-                    else
-                    {
-                        GameInfo = "Spoofing Another Game";
-                        GameName = SpoofedGameName;
-                    }
-                }
-                HomeViewModel.AutoSpoofedTitleID = "0";
-            }
+            string titleId = TitleIDOverride;
+            HomeViewModel.AutoSpoofedTitleID = titleId;
+            HomeViewModel.SpoofingStatus = 2;
+            GameInfo = "Auto Spoofing";
+            if (GetFirstTitleName(GameInfoResponse) != null)
+                GameName = SpoofedGameName;
+            await Spoofing();
+        }
+
+        private bool IsAutoRun(CancellationTokenSource run) =>
+            ReferenceEquals(_autoSpoofCts, run) && !run.IsCancellationRequested &&
+            HomeViewModel.SpoofingStatus == 2;
+
+        private void StopAutoSpoof(CancellationTokenSource run, string reason)
+        {
+            if (!IsAutoRun(run))
+                return;
+            run.Cancel();
+            _autoSpoofCts = null;
+            HomeViewModel.SpoofingStatus = 0;
+            HomeViewModel.AutoSpoofedTitleID = "0";
+            GameInfo = reason;
         }
 
         public async Task Spoofing()
         {
-            await TrySendHeartbeat();
-            var i = 0;
-            Thread.Sleep(1000);
+            _autoSpoofCts?.Cancel();
+            var run = new CancellationTokenSource();
+            _autoSpoofCts = run;
             SpoofingUpdate = false;
-            while (!SpoofingUpdate)
-            {
-                if (i == 300)
-                {
-                    await TrySendHeartbeat();
-                    i = 0;
-                }
-                else
-                {
-                    if (SpoofingUpdate)
-                    {
-
-                        break;
-                    }
-                    i++;
-                }
-                Thread.Sleep(1000);
-            }
-        }
-
-        private async Task TrySendHeartbeat()
-        {
+            string titleId = HomeViewModel.AutoSpoofedTitleID;
+            int seconds = 300;
             try
             {
-                await _xboxRestAPI.Value.SendHeartbeatAsync(HomeViewModel.XUIDOnly, HomeViewModel.AutoSpoofedTitleID);
+                while (IsAutoRun(run) && !SpoofingUpdate)
+                {
+                    if (seconds >= 300)
+                    {
+                        seconds = 0;
+                        try
+                        {
+                            await _xboxRestAPI.Value.SendHeartbeatAsync(HomeViewModel.XUIDOnly, titleId, run.Token)
+                                .WaitAsync(run.Token);
+                        }
+                        catch (OperationCanceledException) when (run.IsCancellationRequested)
+                        {
+                            break;
+                        }
+                        catch (Exception ex)
+                        {
+                            if (!IsAutoRun(run))
+                                break;
+                            var status = (ex as HttpRequestException)?.StatusCode;
+                            DiagLog.Write($"[SPOOF] auto-spoof heartbeat failed: {ex.GetType().Name} HTTP {(int?)status ?? 0}: {ex.Message}");
+                            if (status == HttpStatusCode.Unauthorized)
+                                HomeViewModel.Instance?.StartAuthRecovery();
+                            if (status == HttpStatusCode.Forbidden)
+                                DiagLog.Write("[SPOOF] auto-spoof heartbeat 403 Forbidden: presence rejected request; authorization cause is not established.");
+                            StopAutoSpoof(run, status == HttpStatusCode.Forbidden
+                                ? "Auto Spoofing Stopped: heartbeat rejected (403 Forbidden)"
+                                : "Auto Spoofing Stopped: heartbeat failed (auth/network)");
+                            break;
+                        }
+                    }
+                    if (!IsAutoRun(run) || SpoofingUpdate)
+                        break;
+                    await AutoSpoofDelayAsync(TimeSpan.FromSeconds(1), run.Token);
+                    seconds++;
+                }
             }
-            catch (HttpRequestException ex) when (ex.StatusCode == HttpStatusCode.Unauthorized)
+            catch (OperationCanceledException) when (run.IsCancellationRequested)
             {
-                // Heartbeat now throws on non-2xx (XboxRestAPI.SendHeartbeatAsync). On a 401 the token
-                // expired mid-session -- trigger the central silent re-acquisition instead of silently
-                // pretending the auto-spoof is alive.
-                DiagLog.Write("[SPOOF] auto-spoof heartbeat 401 -- starting auth recovery");
-                HomeViewModel.Instance?.StartAuthRecovery();
+                // Manual takeover or a new auto run.
             }
-            catch (Exception)
+            catch (Exception ex)
             {
+                DiagLog.Write($"[SPOOF] auto-spoof loop threw {ex.GetType().Name}: {ex.Message}");
+                StopAutoSpoof(run, "Auto Spoofing Stopped: unexpected error");
+            }
+            finally
+            {
+                if (ReferenceEquals(_autoSpoofCts, run))
+                {
+                    _autoSpoofCts = null;
+                    HomeViewModel.AutoSpoofedTitleID = "0";
+                    if (HomeViewModel.SpoofingStatus == 2)
+                    {
+                        HomeViewModel.SpoofingStatus = 0;
+                        GameInfo = "Auto Spoofing Stopped";
+                    }
+                    else if (HomeViewModel.SpoofingStatus == 1)
+                    {
+                        GameInfo = HomeViewModel.SpoofedTitleID == titleId
+                            ? "Manually Spoofing" : "Spoofing Another Game";
+                    }
+                }
             }
         }
 

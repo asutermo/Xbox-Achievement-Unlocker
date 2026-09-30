@@ -21,14 +21,15 @@ public class XboxRestAPI
     // the Xbox Live endpoints. Kept separate so a status ping never disturbs the authed clients'
     // default headers.
     internal readonly HttpClient _probeClient;
+    internal TimeSpan ProbeTimeout { get; set; } = TimeSpan.FromSeconds(5);
 
     // User specifics
-    private readonly string _xauth;
     private readonly string _requestedResponseLanguage;
 
     public XboxRestAPI(string xauth)
     {
-        _xauth = xauth;
+        // The constructor retains its original signature for existing callers. Authorization must
+        // always come from the active session; a captured constructor token would survive logout.
         _requestedResponseLanguage = ResolveAcceptLanguage(HomeViewModel.Settings.RegionOverride,
             System.Globalization.CultureInfo.CurrentCulture.Name);
         var handler = new HttpClientHandler()
@@ -60,8 +61,8 @@ public class XboxRestAPI
         public ProbeTarget(string name, string url) { Name = name; Url = url; }
     }
 
-    // The exact endpoints this tool leans on (all straight from Constants, so known-good). If Xbox
-    // play-time reads 0 everywhere, the one that matters most is "userstats".
+    // Unauthenticated liveness probes. Root GETs are not the authenticated operations used
+    // for stats or presence; their response is only a reachability signal.
     private static readonly ProbeTarget[] ServiceProbeTargets = new[]
     {
         new ProbeTarget("profile", "https://profile.xboxlive.com/users/me/profile/settings?settings=Gamertag"),
@@ -72,11 +73,9 @@ public class XboxRestAPI
     };
 
     /// <summary>
-    /// Liveness-probes the Xbox Live endpoints above and classifies the HTTP class of each reply.
-    /// The classification is the whole point: 2xx-4xx means "Xbox is awake; the problem is our
-    /// token/data", while only a 5xx or a total failure-to-reach an endpoint is evidence of a
-    /// Microsoft-side outage. No auth is sent, so a 401/403 here is EXPECTED and still counts as
-    /// "responding" -- deliberately NOT an outage signal.
+    /// Liveness-probes the endpoints above without authentication. A 401/403 means the
+    /// endpoint answered but says nothing about this user's token or the heartbeat POST.
+    /// A 5xx or no response may be a service, proxy, or local-network problem.
     /// </summary>
     public async Task<XblServiceHealthReport> CheckServiceHealthAsync()
     {
@@ -88,7 +87,8 @@ public class XboxRestAPI
             string detail = null;
             try
             {
-                var response = await _probeClient.GetAsync(target.Url);
+                using var timeout = new CancellationTokenSource(ProbeTimeout);
+                using var response = await _probeClient.GetAsync(target.Url, timeout.Token);
                 reached = true;
                 code = (int)response.StatusCode;
             }
@@ -121,8 +121,7 @@ public class XboxRestAPI
     internal static string ResolveAcceptLanguage(bool regionOverride, string? cultureName) =>
         regionOverride || string.IsNullOrWhiteSpace(cultureName) ? "en-GB" : cultureName;
 
-    internal string CurrentXauth =>
-        !string.IsNullOrWhiteSpace(HomeViewModel.XAUTH) ? HomeViewModel.XAUTH : _xauth;
+    internal string CurrentXauth => HomeViewModel.XAUTH;
 
     internal void SetDefaultHeaders()
     {
@@ -308,7 +307,7 @@ public class XboxRestAPI
         return JsonConvert.DeserializeObject<GameStatsResponse>(response);
     }
 
-    public async Task SendHeartbeatAsync(string xuid, string spoofedTitleId)
+    public async Task SendHeartbeatAsync(string xuid, string spoofedTitleId, CancellationToken cancellationToken = default)
     {
         if (string.IsNullOrWhiteSpace(xuid) || string.IsNullOrWhiteSpace(spoofedTitleId))
         {
@@ -328,9 +327,9 @@ public class XboxRestAPI
                 }
             }
         };
-        var response = await _spooferClient.PostAsync(
-        string.Format(InterpolatedXboxAPIUrls.HeartbeatUrl, xuid),
-        new StringContent(JsonConvert.SerializeObject(heartbeatRequest), Encoding.UTF8, HeaderValues.Accept));
+        using var content = new StringContent(JsonConvert.SerializeObject(heartbeatRequest), Encoding.UTF8, HeaderValues.Accept);
+        using var response = await _spooferClient.PostAsync(
+            string.Format(InterpolatedXboxAPIUrls.HeartbeatUrl, xuid), content, cancellationToken);
 
         // A heartbeat that 401s/403s/throttles used to be indistinguishable from success: the spoof
         // loop kept displaying "Spoofing X for: hh:mm:ss" while presence actually died when this
@@ -338,11 +337,10 @@ public class XboxRestAPI
         // count failures, trigger auth recovery, and stop pretending the spoof is alive.
         if (!response.IsSuccessStatusCode)
         {
-            string body = await response.Content.ReadAsStringAsync();
-            if (body.Length > 300)
-                body = body.Substring(0, 300);
+            // Response bodies can contain account/session data; the status is enough to
+            // classify a rejected heartbeat without writing the body to diagnostics.
             throw new HttpRequestException(
-                $"Heartbeat failed: {(int)response.StatusCode} {response.StatusCode}. {body}",
+                $"Heartbeat failed: {(int)response.StatusCode} {response.StatusCode}",
                 null, response.StatusCode);
         }
     }

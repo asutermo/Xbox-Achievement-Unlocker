@@ -140,9 +140,9 @@ public class XboxStatusTests
     #region User-facing renderer (healthy wording + list lines)
 
     [Theory]
-    // The whole point: a 4xx on an unauthenticated liveness ping is HEALTHY, not "rejected".
+    // A 4xx proves reachability, not that an authenticated operation will succeed.
     [InlineData(XblServiceVerdict.Operational, "healthy")]
-    [InlineData(XblServiceVerdict.RespondingClientError, "healthy")]
+    [InlineData(XblServiceVerdict.RespondingClientError, "responding")]
     [InlineData(XblServiceVerdict.RateLimited, "busy")]
     [InlineData(XblServiceVerdict.ServerError, "DOWN")]
     [InlineData(XblServiceVerdict.Unreachable, "unreachable")]
@@ -168,13 +168,28 @@ public class XboxStatusTests
         });
         Assert.Equal(3, lines.Count);
         Assert.Equal("profile - healthy", lines[0]);
-        Assert.Equal("titlehub - healthy", lines[1]); // 4xx renders as healthy
+        Assert.Equal("titlehub - responding", lines[1]); // reachability, not authenticated health
         Assert.Equal("userstats - DOWN", lines[2]);
     }
 
     [Fact]
     public void StatusLines_Empty_IsEmptyList()
         => Assert.Empty(XblServiceHealth.StatusLines(System.Array.Empty<XblServiceProbeResult>()));
+
+    [Fact]
+    public void RateLimitedEndpoints_AreBusyRatherThanHealthy()
+    {
+        var results = new[] { Probe("presence", true, 429) };
+        Assert.Equal("busy", XblServiceHealth.OverallStatus(results));
+        Assert.Contains("Xbox Status: busy", XblServiceHealth.Summarize(results));
+    }
+
+    [Fact]
+    public void UnauthorizedProbe_ProvesOnlyThatTheEndpointResponded()
+    {
+        var results = new[] { Probe("presence", true, 403) };
+        Assert.Equal("responding", XblServiceHealth.OverallStatus(results));
+    }
 
     [Theory]
     [InlineData(true, "possible outage")]

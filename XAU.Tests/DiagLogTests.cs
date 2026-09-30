@@ -14,6 +14,12 @@ namespace XAU.Tests;
 public class DiagLogTests
 {
     [Fact]
+    public void DiagnosticsRequireOptInForNewSettings()
+    {
+        Assert.False(new XAUSettings().EnableDiagnosticsLog);
+    }
+
+    [Fact]
     public void FormatLine_PrependsFullDateTimeStamp_AndKeepsPayload()
     {
         var line = DiagLog.FormatLine("[XAUTHDBG] TestXAUTH: SUCCESS");
@@ -42,7 +48,7 @@ public class DiagLogTests
     }
 
     [Fact]
-    public void Enabled_DefaultsToTrue_AndRoundTrips()
+    public void Enabled_RoundTrips()
     {
         var prev = DiagLog.Enabled;
         try

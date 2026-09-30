@@ -227,7 +227,7 @@
                     <ui:TextBlock
                         Grid.Row="1"
                         Foreground="{ui:ThemeResource TextFillColorSecondaryBrush}"
-                        Text="Write token/stats/status diagnostics to %LOCALAPPDATA%\XAU\logs\xau_diagnostics.log for troubleshooting."
+                        Text="Opt in to local auth/status diagnostics at %LOCALAPPDATA%\XAU\logs\xau_diagnostics.log. Treat logs as private account data; do not share them unredacted."
                         TextWrapping="WrapWithOverflow" />
                 </Grid>
             </ui:CardControl.Header>
