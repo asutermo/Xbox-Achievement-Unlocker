@@ -2,21 +2,6 @@ using System.Collections.ObjectModel;
 using System.ComponentModel;
 using System.Diagnostics;
 using System.IO;
-<<<<<<< HEAD
-=======
-using System.Security.Cryptography;
-using System.Text;
-using XAU.Util.Etw;
-using XAU.Util.Diagnostics;
-using System.Windows.Media;
-using Wpf.Ui.Controls;
-using Memory;
-using System.Net.Http;
-using Newtonsoft.Json.Linq;
-using Newtonsoft.Json;
-using System.Net;
-using System.Collections.ObjectModel;
->>>>>>> 91bebb8 (Add xbox status check checks)
 using System.IO.Compression;
 using System.Net;
 using System.Net.Http;
@@ -73,6 +58,9 @@ namespace XAU.ViewModels.Pages
         //SnackBar
         public HomeViewModel(ISnackbarService snackbarService, IContentDialogService contentDialogService)
         {
+            // Singleton in DI (App.xaml.cs) -- publish the one instance so background consumers
+            // (heartbeat loops, HTTP-server routes) can reach instance methods like auth recovery.
+            Instance = this;
             _snackbarService = snackbarService;
             _contentDialogService = contentDialogService;
 
@@ -89,44 +77,23 @@ namespace XAU.ViewModels.Pages
             GrabProfile(force: true);
         }
 
-<<<<<<< HEAD
-=======
-        [RelayCommand]
-        private void OpenXboxStatusPage()
-        {
-            try
-            {
-                var p = new Process();
-                p.StartInfo = new ProcessStartInfo
-                {
-                    UseShellExecute = true,
-                    FileName = "https://support.xbox.com/en-US/xbox-live-status"
-                };
-                p.Start();
-            }
-            catch (Exception ex)
-            {
-                EventsLog($"[XBLSTATUS] could not open status page: {ex.GetType().Name}: {ex.Message}");
-            }
-        }
-
-        Mem m = new Mem();
-        public BackgroundWorker XauthWorker = new BackgroundWorker();
-        public BackgroundWorker EventsTokenWorker = new BackgroundWorker();
-        bool IsAttached = false;
-        bool GrabbedProfile = false;
-        bool _grabProfileInFlight = false;
-        bool eventsTokenFound = false;
-        public static bool XAUTHTested = false;
->>>>>>> 91bebb8 (Add xbox status check checks)
         public static string XAUTH = "";
         public static string XUIDOnly = "";
         public static bool InitComplete = false;
+
+        // The single DI-registered HomeViewModel instance (see ctor). Static state like XAUTH lives
+        // on this class; instance entry points (TryRecoverAuthAsync) are reached through this.
+        public static HomeViewModel? Instance;
 
         // Cadence/anti-thrash state for the memory-scan token grabber. While we already hold a
         // (possibly expired) token we don't re-scan the whole user address space on every ~1s poll
         // tick -- only often enough to notice the Xbox app refreshing to a NEW token. See
         // ShouldScanForXauth / ShouldAdoptScannedToken.
+        // How often the logged-in probe re-validates a HELD token. Without this an OAuth/SISU XBL3.0
+        // token that expires hours into a session is never detected: TestXAUTH used to run only while
+        // signed OUT, so the first sign of expiry was every other API call 401-ing at once.
+        private static readonly TimeSpan LoggedInProbeInterval = TimeSpan.FromMinutes(15);
+
         private static readonly TimeSpan XauthScanInterval = TimeSpan.FromSeconds(5);
         private static DateTime _lastXauthScanUtc = DateTime.MinValue;
         private bool _xauthScanInFlight = false;
@@ -795,8 +762,24 @@ namespace XAU.ViewModels.Pages
 
         private void LoadSettings()
         {
-            var settingsJson = File.ReadAllText(SettingsFilePath);
-            var settings = JsonConvert.DeserializeObject<XAUSettings>(settingsJson);
+            // A corrupt/truncated settings.json (or a lock from a parallel write) used to crash
+            // startup right here. Degrade to defaults instead; the user can still save over it.
+            string? settingsJson;
+            XAUSettings? settings;
+            try
+            {
+                settingsJson = File.ReadAllText(SettingsFilePath);
+                settings = JsonConvert.DeserializeObject<XAUSettings>(settingsJson);
+            }
+            catch (Exception ex)
+            {
+                DiagLog.Write($"[SETTINGS] failed to read/deserialise {SettingsFilePath}: {ex.GetType().Name}: {ex.Message} -- continuing with in-memory defaults.");
+                _snackbarService.Show(
+                    "Settings load failed",
+                    "settings.json could not be read; defaults are in use. Saving settings will overwrite the bad file.",
+                    ControlAppearance.Caution, new SymbolIcon(SymbolRegular.Warning24), _snackbarDuration);
+                return;
+            }
             if (settings == null)
             {
                 _snackbarService.Show(

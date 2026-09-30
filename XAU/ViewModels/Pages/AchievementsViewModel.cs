@@ -1,6 +1,7 @@
 using System.Collections.ObjectModel;
 using System.Globalization;
 using System.IO;
+using System.Net;
 using System.Net.Http;
 using System.Text;
 using System.Windows.Data;
@@ -10,6 +11,7 @@ using Wpf.Ui.Controls;
 using Wpf.Ui.Common;
 using Wpf.Ui.Contracts;
 using Wpf.Ui.Services;
+using XAU.Util.Logging;
 using XAU.Views.Pages;
 
 namespace XAU.ViewModels.Pages
@@ -255,6 +257,14 @@ namespace XAU.ViewModels.Pages
             try
             {
                 await _xboxRestAPI.Value.SendHeartbeatAsync(HomeViewModel.XUIDOnly, HomeViewModel.AutoSpoofedTitleID);
+            }
+            catch (HttpRequestException ex) when (ex.StatusCode == HttpStatusCode.Unauthorized)
+            {
+                // Heartbeat now throws on non-2xx (XboxRestAPI.SendHeartbeatAsync). On a 401 the token
+                // expired mid-session -- trigger the central silent re-acquisition instead of silently
+                // pretending the auto-spoof is alive.
+                DiagLog.Write("[SPOOF] auto-spoof heartbeat 401 -- starting auth recovery");
+                HomeViewModel.Instance?.StartAuthRecovery();
             }
             catch (Exception)
             {

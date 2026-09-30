@@ -3,6 +3,7 @@ using System.Net.Http;
 using System.Text;
 using System.Text.RegularExpressions;
 using XAU.Util.Diagnostics;
+using XAU.Util.Logging;
 using Newtonsoft.Json;
 using Newtonsoft.Json.Linq;
 using XAU.ViewModels.Pages;
@@ -94,10 +95,12 @@ public class XboxRestAPI
             catch (HttpRequestException ex)
             {
                 // A status code means the endpoint DID answer over HTTP -> it is reachable.
-                int c = (int)ex.StatusCode;
+                // StatusCode is NULLABLE on HttpRequestException (null = no HTTP response at all),
+                // so guard the cast instead of throwing from inside the catch.
+                int c = (int?)ex.StatusCode ?? 0;
                 reached = c != 0;
                 code = c;
-                detail = ex.StatusCode + " " + ex.Message;
+                detail = (ex.StatusCode?.ToString() ?? "<no status>") + " " + ex.Message;
             }
             catch (Exception ex)
             {
@@ -108,7 +111,7 @@ public class XboxRestAPI
 
             var verdict = XblServiceHealth.Classify(reached, code);
             results.Add(new XblServiceProbeResult(target.Name, target.Url, reached, code, verdict, detail));
-            HomeViewModel.EventsLog($"[XBLSTATUS] {target.Name}: {verdict} code={code} {detail}");
+            DiagLog.Write($"[XBLSTATUS] {target.Name}: {verdict} code={code} {detail}");
         }
 
         return new XblServiceHealthReport(
@@ -318,12 +321,26 @@ public class XboxRestAPI
 
         SetDefaultSpooferHeaders();
         _spooferClient.DefaultRequestHeaders.Add(HeaderNames.ContractVersion, HeaderValues.ContractVersion3);
-        _spooferClient.DefaultRequestHeaders.Add("Cache-Control", "no-cache");
+_spooferClient.DefaultRequestHeaders.Add("Cache-Control", "no-cache");
         if (signature != null)
             _spooferClient.DefaultRequestHeaders.Add("Signature", signature);
 
-        await _spooferClient.PostAsync(url,
+        var response = await _spooferClient.PostAsync(url,
             new StringContent(body, Encoding.UTF8, "application/json"));
+
+        // A heartbeat that 401s/403s/throttles used to be indistinguishable from success: the spoof
+        // loop kept displaying "Spoofing X for: hh:mm:ss" while presence actually died when this
+        // single heartbeat's `expiration` (600s) elapsed. Surface the failure so the caller can
+        // count failures, trigger auth recovery, and stop pretending the spoof is alive.
+        if (!response.IsSuccessStatusCode)
+        {
+            string respBody = await response.Content.ReadAsStringAsync();
+            if (respBody.Length > 300)
+                respBody = respBody.Substring(0, 300);
+            throw new HttpRequestException(
+                $"Heartbeat failed: {(int)response.StatusCode} {response.StatusCode}. {respBody}",
+                null, response.StatusCode);
+        }
     }
 
     public async Task StopHeartbeatAsync(string xuid)
@@ -336,10 +353,14 @@ public class XboxRestAPI
 
         SetDefaultSpooferHeaders();
         _spooferClient.DefaultRequestHeaders.Add(HeaderNames.ContractVersion, HeaderValues.ContractVersion3);
-        if (signature != null)
+if (signature != null)
             _spooferClient.DefaultRequestHeaders.Add("Signature", signature);
 
-        await _spooferClient.DeleteAsync(url);
+        var response = await _spooferClient.DeleteAsync(url);
+        if (!response.IsSuccessStatusCode)
+        {
+            throw new HttpRequestException($"Heartbeat removal failed: {(int)response.StatusCode} {response.StatusCode}", null, response.StatusCode);
+        }
     }
 
     public async Task<AchievementsResponse?> GetAchievementsForTitleAsync(string xuid, string titleId)
