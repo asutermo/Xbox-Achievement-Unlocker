@@ -48,12 +48,28 @@ public class XboxRestApiHeaderTests : IDisposable
     [Fact]
     public void SetDefaultHeaders_WithToken_AddsAuthorization()
     {
-        var api = new XboxRestAPI("XBL3.0 x=123;sometoken");
+        HomeViewModel.XAUTH = "XBL3.0 x=123;sometoken";
+        var api = new XboxRestAPI(HomeViewModel.XAUTH);
 
         api.SetDefaultHeaders();
 
         Assert.Equal("XBL3.0 x=123;sometoken",
             api._httpClient.DefaultRequestHeaders.GetValues(HeaderNames.Authorization).Single());
+    }
+
+    [Fact]
+    public void ExistingClient_DropsAuthorization_WhenSessionIsCleared()
+    {
+        const string synthetic = "XBL3.0 x=1;synthetic-not-a-token";
+        HomeViewModel.XAUTH = synthetic;
+        var api = new XboxRestAPI(synthetic);
+        api.SetDefaultSpooferHeaders();
+        Assert.True(api._spooferClient.DefaultRequestHeaders.Contains(HeaderNames.Authorization));
+
+        HomeViewModel.XAUTH = "";
+        api.SetDefaultSpooferHeaders();
+
+        Assert.False(api._spooferClient.DefaultRequestHeaders.Contains(HeaderNames.Authorization));
     }
 
     [Fact]
@@ -71,7 +87,8 @@ public class XboxRestApiHeaderTests : IDisposable
     [Fact]
     public void SetDefaultEventBasedHeaders_StripsXuidFromAuthxtoken()
     {
-        var api = new XboxRestAPI("XBL3.0 x=1234567890;sometoken");
+        HomeViewModel.XAUTH = "XBL3.0 x=1234567890;sometoken";
+        var api = new XboxRestAPI(HomeViewModel.XAUTH);
 
         api.SetDefaultEventBasedHeaders();
 

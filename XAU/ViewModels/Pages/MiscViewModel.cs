@@ -5,12 +5,8 @@ using System.Data;
 using System.Diagnostics;
 using System.DirectoryServices;
 using System.IO;
-using System.Net;
-using System.Net.Http;
 using System.Text;
 using System.Windows.Input;
-using XAU.Util.Diagnostics;
-using XAU.Util.Logging;
 using Wpf.Ui.Common;
 using Wpf.Ui.Contracts;
 using Wpf.Ui.Controls;
@@ -32,144 +28,6 @@ namespace XAU.ViewModels.Pages
         {
             _snackbarService = snackbarService;
             _contentDialogService = new ContentDialogService();
-        }
-
-        // Xbox Live endpoint health check. It deliberately lives here (Misc) and runs ONLY on-demand,
-        // so the verbose per-service detail never clutters the Home landing page -- Home only offers
-        // a button that opens the official status page.
-        [ObservableProperty] private string _xboxServiceStatus = "not checked";
-        [ObservableProperty] private bool _isCheckingXboxServiceHealth = false;
-        [ObservableProperty] private List<string> _xboxServiceStatusLines = new List<string>();
-
-        /// <summary>
-        /// Probes the Xbox Live endpoints we actually use and classifies each reply. Any HTTP answer
-        /// (2xx-4xx) means "Xbox is awake; a 0h/'Unknown' is our token/data"; only a 5xx or an
-        /// unreachable endpoint points at a Microsoft-side outage.
-        /// </summary>
-        [RelayCommand]
-        private async void CheckXboxServiceHealth()
-        {
-            if (IsCheckingXboxServiceHealth)
-                return;
-            IsCheckingXboxServiceHealth = true;
-            try
-            {
-                var report = await _xboxRestAPI.Value.CheckServiceHealthAsync();
-                XboxServiceStatus = XblServiceHealth.OverallStatus(report.Results);
-                XboxServiceStatusLines = XblServiceHealth.StatusLines(report.Results);
-                if (report.LooksLikeServiceOutage)
-                    _snackbarService.Show("Xbox Live status",
-                        "Some Xbox Live services are DOWN/unreachable -- this looks like an Xbox-side problem, not XAU.",
-                        ControlAppearance.Caution, new SymbolIcon(SymbolRegular.Warning24), _snackbarDuration);
-                else
-                    _snackbarService.Show("Xbox Live status",
-                        "Xbox Live services are healthy. A 0h/'Unknown' profile here is an account/token issue, not an outage.",
-                        ControlAppearance.Success, new SymbolIcon(SymbolRegular.Checkmark24), _snackbarDuration);
-            }
-            catch (Exception ex)
-            {
-                XboxServiceStatus = "check failed";
-                XboxServiceStatusLines = new List<string>();
-                Debug.WriteLine($"[XBLSTATUS] check threw {ex.GetType().Name}: {ex.Message}");
-            }
-            finally
-            {
-                IsCheckingXboxServiceHealth = false;
-            }
-        }
-
-        /// <summary>
-        /// Pulls the MinutesPlayed figure (in minutes) out of a userstats batch response by scanning
-        /// EVERY stat bucket for one whose Name is "MinutesPlayed", instead of trusting [0][0]. Returns
-        /// the LARGEST matching value (the all-time aggregate dominates any seasonal/device slice) or -1
-        /// when no MinutesPlayed stat exists at all (caller then shows "Unknown").
-        /// </summary>
-        public static double GetMinutesPlayed(GameStatsResponse response)
-        {
-            if (response == null || response.StatListsCollection == null)
-                return -1;
-
-            double best = -1;
-            foreach (var list in response.StatListsCollection)
-            {
-                if (list == null || list.Stats == null)
-                    continue;
-                foreach (var stat in list.Stats)
-                {
-                    if (stat == null)
-                        continue;
-                    // Only ever consider the MinutesPlayed statistic, so a Gamerscore/Score/etc. can
-                    // never be mistaken for play-time (which the old positional [0][0] read risked).
-                    if (!string.Equals(stat.Name?.Trim(), "MinutesPlayed", StringComparison.OrdinalIgnoreCase))
-                        continue;
-
-                    // The figure usually sits in Value; some responses surface it only via Properties /
-                    // GroupProperties, so fall back to a numeric found there before giving up.
-                    if ((TryParseMinutes(stat.Value, out double value)
-                            || TryParseAnyNumeric(stat.Properties, out value)
-                            || TryParseAnyNumeric(stat.GroupProperties, out value))
-                        && value > best)
-                    {
-                        best = value;
-                    }
-                }
-            }
-            return best;
-        }
-
-        private static bool TryParseMinutes(string candidate, out double value)
-        {
-            value = 0;
-            return !string.IsNullOrWhiteSpace(candidate)
-                && double.TryParse(candidate.Trim(),
-                    System.Globalization.NumberStyles.Float | System.Globalization.NumberStyles.AllowThousands,
-                    System.Globalization.CultureInfo.InvariantCulture, out value);
-        }
-
-        private static bool TryParseAnyNumeric(Dictionary<string, object> props, out double value)
-        {
-            value = 0;
-            if (props == null)
-                return false;
-            foreach (var kv in props)
-            {
-                if (kv.Value == null)
-                    continue;
-                if (double.TryParse(kv.Value.ToString()?.Trim(),
-                        System.Globalization.NumberStyles.Float | System.Globalization.NumberStyles.AllowThousands,
-                        System.Globalization.CultureInfo.InvariantCulture, out value))
-                {
-                    return true;
-                }
-            }
-            return false;
-        }
-
-        /// <summary>Debug-only: renders every (listIndex, statIndex) Name/Type/Value so a live run shows
-        /// WHICH bucket actually carries the minutesplayed figure (see [STATDBG] log).</summary>
-        public static string DumpStatBuckets(GameStatsResponse response)
-        {
-            if (response == null || response.StatListsCollection == null)
-                return "<no stat lists>";
-
-            var sb = new StringBuilder();
-            for (int i = 0; i < response.StatListsCollection.Count; i++)
-            {
-                var list = response.StatListsCollection[i];
-                if (list == null || list.Stats == null)
-                    continue;
-                for (int j = 0; j < list.Stats.Count; j++)
-                {
-                    var s = list.Stats[j];
-                    sb.Append($"[{i}][{j}] name={s?.Name} type={s?.Type} value={(s?.Value == null ? "<null>" : "\"" + s.Value + "\"")}");
-                    if (s?.Properties != null && s.Properties.Count > 0)
-                        sb.Append(" props={" + string.Join(",", s.Properties.Select(p => p.Key + ":" + p.Value)) + "}");
-                    if (s?.GroupProperties != null && s.GroupProperties.Count > 0)
-                        sb.Append(" grp={" + string.Join(",", s.GroupProperties.Select(p => p.Key + ":" + p.Value)) + "}");
-                    sb.Append("; ");
-                }
-            }
-            return sb.Length == 0 ? "<empty>" : sb.ToString();
         }
 
         public void OnNavigatedTo()
@@ -203,28 +61,18 @@ namespace XAU.ViewModels.Pages
         [ObservableProperty] private string _newSpoofingID = "";
         [ObservableProperty] private string _spoofingText = "Spoofing Not Started";
         [ObservableProperty] private string _spoofingButtonText = "Start Spoofing";
+        private bool SpoofingUpdate = false;
         private bool CurrentlySpoofing = false;
         private GameTitle GameInfoResponse;
         private GameStatsResponse GameStatsResponse;
-
-        // Per-loop cancellation. The old shared `SpoofingUpdate` bool was both the stop signal and the
-        // "new loop initializes me to false" signal, so a quick Stop->Start could have the old loop
-        // miss its stop (it sleeps up to 1s between checks) while the new run re-arms the flag --
-        // leaving TWO heartbeat loops fighting over presence (two titles alternating every 5 min),
-        // which is one way a spoof "doesn't persist". A CTS per spoof run cannot be resurrected.
-        private CancellationTokenSource? _spoofCts;
-        private int _heartbeatFailureCount;
 
         [RelayCommand]
         public async Task SpooferButtonClicked()
         {
             if (CurrentlySpoofing)
             {
-                // Cancelling the CTS actually terminates the spoof loop; the old `SpoofingUpdate = true`
-                // raced with a concurrently-starting loop re-arming the same flag.
-                _spoofCts?.Cancel();
+                SpoofingUpdate = true;
                 CurrentlySpoofing = false;
-                HomeViewModel.SpoofedTitleID = "0";
                 SpoofingText = "Spoofing Not Started";
                 SpoofingButtonText = "Start Spoofing";
                 //reset game info
@@ -258,35 +106,9 @@ namespace XAU.ViewModels.Pages
             SpoofGame();
         }
 
-        /// <summary>
-        /// Tears down the spoof loop after unrecoverable heartbeat failures (or any future hard-stop
-        /// need): cancels the loop, resets the spoofing state, and shows WHY it stopped so the UI no
-        /// longer claims a spoof is alive that has actually lapsed.
-        /// </summary>
-        private void AbortSpoofing(string reason)
-        {
-            _spoofCts?.Cancel();
-            CurrentlySpoofing = false;
-            HomeViewModel.SpoofingStatus = 0;
-            HomeViewModel.SpoofedTitleID = "0";
-            SpoofingText = reason;
-            SpoofingButtonText = "Start Spoofing";
-            DiagLog.Write($"[SPOOF] aborted: {reason}");
-        }
-
         public async void SpoofGame()
         {
             CurrentSpoofingID = NewSpoofingID;
-
-            // Kill any previous spoof loop BEFORE the network fetches below. The old code cancelled
-            // only at the END of this method, so a previous run (its heartbeats AND its UI text for
-            // the OLD game) stayed alive for the whole fetch window -- a stop/start shuffle could
-            // then show "Spoofing <old game>" while heartbeats went to the new title.
-            _spoofCts?.Cancel();
-            var spoofCts = new CancellationTokenSource();
-            _spoofCts = spoofCts;
-            _heartbeatFailureCount = 0;
-
             try
             {
                 GameInfoResponse = await _xboxRestAPI.Value.GetGameTitleAsync(HomeViewModel.XUIDOnly, NewSpoofingID);
@@ -298,7 +120,6 @@ namespace XAU.ViewModels.Pages
                     $"The request failed: {ex.Message}",
                     ControlAppearance.Danger,
                     new SymbolIcon(SymbolRegular.ErrorCircle24), _snackbarDuration);
-                AbortSpoofing("Spoofing Not Started");
                 return;
             }
 
@@ -308,7 +129,6 @@ namespace XAU.ViewModels.Pages
                     $"The game info was invalid.",
                     ControlAppearance.Danger,
                     new SymbolIcon(SymbolRegular.ErrorCircle24), _snackbarDuration);
-                AbortSpoofing("Spoofing Not Started");
                 return;
             }
 
@@ -329,40 +149,15 @@ namespace XAU.ViewModels.Pages
                 GameDevices = GameDevices.Remove(GameDevices.Length - 2);
                 GameGamerscore = "Gamerscore: " + GameInfoResponse.Titles[0].Achievement?.CurrentGamerscore.ToString() +
                                  "/" + GameInfoResponse.Titles[0].Achievement?.TotalGamerscore.ToString();
-                // The userstats batch can return MORE THAN ONE "MinutesPlayed" bucket (an all-time
-                // aggregate plus seasonal/device slices). The old code read [0][0] blindly, so when the
-                // first bucket happened to be a 0-minute seasonal slice XAU showed 0h 0m even though
-                // TrueAchievements (which selects by statistic + takes the aggregate) showed real time.
-                // Select by statistic NAME across every bucket and keep the largest -- the all-time
-                // aggregate always dominates any single slice. See GetMinutesPlayed.
-                DiagLog.Write($"[STATDBG] raw buckets: {DumpStatBuckets(GameStatsResponse)}");
-                double minutesPlayed = GetMinutesPlayed(GameStatsResponse);
-                if (minutesPlayed >= 0)
+                try
                 {
-                    var timePlayed = TimeSpan.FromMinutes(minutesPlayed);
+                    var timePlayed = TimeSpan.FromMinutes(Convert.ToDouble(GameStatsResponse.StatListsCollection[0].Stats[0].Value));
                     var formattedTime = $"{timePlayed.Days} Days, {timePlayed.Hours} Hours and {timePlayed.Minutes} minutes";
                     GameTime = "Time Played: " + formattedTime;
                 }
-                else
+                catch
                 {
-                    // "Unknown" must NOT conflate two very different causes: (a) we're not signed in /
-                    // the token isn't authorized for userstats (these calls never check the HTTP status
-                    // code, so a denied/empty batch deserialises to an empty response and looks benign),
-                    // vs (b) genuinely no MinutesPlayed data for this title. Split them so the user can
-                    // tell, and log the evidence to the diagnostics file.
-                    bool statsEmpty = GameStatsResponse == null
-                        || GameStatsResponse.StatListsCollection == null
-                        || GameStatsResponse.StatListsCollection.Count == 0;
-                    DiagLog.Write(
-                        $"[STATDBG] no usable MinutesPlayed: loggedIn={HomeViewModel._isLoggedIn}, " +
-                        $"xauthLen={(HomeViewModel.XAUTH?.Length ?? 0)}, statsEmpty={statsEmpty}");
-
-                    if (!HomeViewModel._isLoggedIn)
-                        GameTime = "Time Played: unavailable (signed out)";
-                    else if (statsEmpty)
-                        GameTime = "Time Played: unavailable (stats empty - sign-in/token?)";
-                    else
-                        GameTime = "Time Played: Unknown (no MinutesPlayed stat)";
+                    GameTime = "Time Played: Unknown";
                 }
 
             }
@@ -376,26 +171,16 @@ namespace XAU.ViewModels.Pages
                 return;
             }
 
-            // Freeze the display name for THIS run. The loop below must never read the shared
-            // GameInfoResponse/GameName fields: they belong to whatever run last wrote them, and any
-            // interleaving (fast stop/start, aborted fetch) made the old run's name bleed into the
-            // new run's text ("says Diablo 4 while spoofing Destiny").
-            string spoofedName = GameInfoResponse.Titles[0].Name;
-
+            SpoofingUpdate = true;
             CurrentlySpoofing = true;
             SpoofingButtonText = "Stop Spoofing";
-            SpoofingText = $"Spoofing {spoofedName}";
-            DiagLog.Write($"[SPOOF] starting spoof loop: titleId={CurrentSpoofingID} name={spoofedName}");
-            await Task.Run(() => Spoofing(spoofCts.Token, spoofedName));
+            SpoofingText = $"Spoofing {GameInfoResponse.Titles[0].Name}";
+            await Task.Run(() => Spoofing());
 
         }
 
-        /// <summary>
-        /// The manual spoof loop. One CTS token per run (owned by the caller), heartbeat every 300s
-        /// (well inside the 600s presence expiration). Exits cleanly on cancellation.
-        /// TODO: this code seems like it's duplicated in AchievementsViewModel.cs too.
-        /// </summary>
-        public async Task Spoofing(CancellationToken token, string titleName)
+        // TODO: this code seems like it's duplicated in AchievementsViewModel.cs too.
+        public async Task Spoofing()
         {
             Stopwatch stopwatch = new Stopwatch();
             stopwatch.Start();
@@ -412,27 +197,13 @@ namespace XAU.ViewModels.Pages
                     HomeViewModel.SpoofedTitleID = "0";
                     break;
                 }
-                SpoofingText = $"Spoofing {GameInfoResponse?.Titles?.FirstOrDefault()?.Name ?? CurrentSpoofingID} For: {stopwatch.Elapsed.ToString(@"hh\:mm\:ss")}";
+                    SpoofingText = $"Spoofing {GameInfoResponse?.Titles?.FirstOrDefault()?.Name ?? CurrentSpoofingID} For: {stopwatch.Elapsed.ToString(@"hh\:mm\:ss")}";
                 if ((DateTime.UtcNow - lastHeartbeat).TotalSeconds >= 300)
                 {
                     await TrySendHeartbeat();
                     lastHeartbeat = DateTime.UtcNow;
                 }
-                else
-                {
-                    if (SpoofingUpdate)
-                    {
-                        await TrySendHeartbeat();
-                        i = 0;
-                    }
-                SpoofingText = $"Spoofing {GameInfoResponse?.Titles?.FirstOrDefault()?.Name ?? CurrentSpoofingID} For: {stopwatch.Elapsed.ToString(@"hh\:mm\:ss")}";
-                }
             }
-            catch (OperationCanceledException)
-            {
-                // Normal stop via SpooferButtonClicked / AbortSpoofing / a newer SpoofGame run.
-            }
-            DiagLog.Write($"[SPOOF] spoof loop for '{titleName}' (titleId={CurrentSpoofingID}) ended.");
         }
 
         private async Task TrySendHeartbeat()
@@ -440,29 +211,9 @@ namespace XAU.ViewModels.Pages
             try
             {
                 await _xboxRestAPI.Value.SendHeartbeatAsync(HomeViewModel.XUIDOnly, CurrentSpoofingID);
-                _heartbeatFailureCount = 0;
             }
-            catch (HttpRequestException ex)
+            catch (Exception)
             {
-                _heartbeatFailureCount++;
-                DiagLog.Write($"[SPOOF] heartbeat failed ({_heartbeatFailureCount} consecutive): {(int?)ex.StatusCode ?? 0} {ex.Message}");
-
-                if (ex.StatusCode == HttpStatusCode.Unauthorized)
-                {
-                    // Token expired mid-spoof: kick silent recovery (OAuth refresh or memory re-scan)
-                    // so a long spoof session can survive a token expiry instead of silently lapsing.
-                    HomeViewModel.Instance?.StartAuthRecovery();
-                }
-
-                if (_heartbeatFailureCount >= 3)
-                {
-                    AbortSpoofing("Spoofing Stopped: heartbeats failing (auth/network). Re-spoof once logged back in.");
-                }
-            }
-            catch (Exception ex)
-            {
-                _heartbeatFailureCount++;
-                DiagLog.Write($"[SPOOF] heartbeat threw {ex.GetType().Name}: {ex.Message}");
             }
         }
 

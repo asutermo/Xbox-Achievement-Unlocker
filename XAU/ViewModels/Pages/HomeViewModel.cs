@@ -77,6 +77,25 @@ namespace XAU.ViewModels.Pages
             GrabProfile(force: true);
         }
 
+        [RelayCommand]
+        private void OpenXboxStatusPage()
+        {
+            try
+            {
+                var p = new Process();
+                p.StartInfo = new ProcessStartInfo
+                {
+                    UseShellExecute = true,
+                    FileName = "https://support.xbox.com/en-US/xbox-live-status"
+                };
+                p.Start();
+            }
+            catch (Exception ex)
+            {
+                EventsLog($"[XBLSTATUS] could not open status page: {ex.GetType().Name}: {ex.Message}");
+            }
+        }
+
         public static string XAUTH = "";
         public static string XUIDOnly = "";
         public static bool InitComplete = false;
@@ -554,7 +573,7 @@ namespace XAU.ViewModels.Pages
         /// Clears all cached authentication state (WAM session tokens, XAUTH, events token).
         /// The user will need to log in again after calling this.
         /// </summary>
-        public void ClearAuthCache()
+        public bool ClearAuthCache()
         {
             // Invalidate XAUTH so the next scan/login re-acquires it
             XAUTH = "";

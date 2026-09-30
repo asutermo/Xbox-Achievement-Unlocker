@@ -14,8 +14,17 @@ namespace XAU.ViewModels.Pages
         [ObservableProperty]
         private string _appVersion = String.Empty;
 
-        static string ProgramFolderPath = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.MyDocuments), "XAU");
-        string SettingsFilePath = Path.Combine(ProgramFolderPath, "settings.json");
+        private readonly string _settingsFilePath;
+
+        public SettingsViewModel() : this(Path.Combine(
+            Environment.GetFolderPath(Environment.SpecialFolder.MyDocuments), "XAU", "settings.json"))
+        { }
+
+        // File-path seam keeps settings persistence tests out of the real Documents directory.
+        internal SettingsViewModel(string settingsFilePath)
+        {
+            _settingsFilePath = settingsFilePath;
+        }
         //settings
         [ObservableProperty] private string _settingsVersion;
         [ObservableProperty] private string _toolVersion;
@@ -56,8 +65,32 @@ namespace XAU.ViewModels.Pages
             // re-write the stale one right after our save.
             lock (HomeViewModel.SettingsWriteLock)
             {
-                HomeViewModel.Settings = settings; // update ref
-                File.WriteAllText(SettingsFilePath, settingsJson);
+                var settings = new XAUSettings
+                {
+                    SettingsVersion = SettingsVersion,
+                    ToolVersion = ToolVersion,
+                    UnlockAllEnabled = UnlockAllEnabled,
+                    AutoSpooferEnabled = AutoSpooferEnabled,
+                    AutoLaunchXboxAppEnabled = AutoLaunchXboxAppEnabled,
+                    LaunchHidden = LaunchHidden,
+                    FakeSignatureEnabled = FakeSignatureEnabled,
+                    RegionOverride = RegionOverride,
+                    UseAcrylic = UseAcrylic,
+                    PrivacyMode = PrivacyMode,
+                    OAuthLogin = OAuthLogin,
+                    AutoGrabEventsToken = AutoGrabEventsToken,
+                    EnableDiagnosticsLog = EnableDiagnosticsLog,
+                    XauthScanReadLength = XauthScanReadLength,
+                    // The events token and provenance are not settings-page fields. Copy them only
+                    // after acquiring the same lock used by PersistEventsToken so saves cannot
+                    // overwrite a concurrent token update with stale data.
+                    CachedEventsToken = HomeViewModel.Settings.CachedEventsToken,
+                    EventsTokenObtainedAt = HomeViewModel.Settings.EventsTokenObtainedAt,
+                    EventsUserHash = HomeViewModel.Settings.EventsUserHash
+                };
+                HomeViewModel.Settings = settings;
+                string settingsJson = JsonConvert.SerializeObject(settings);
+                File.WriteAllText(_settingsFilePath, settingsJson);
             }
             // Apply the just-saved choice immediately so turning logging off takes effect without a restart.
             DiagLog.Enabled = EnableDiagnosticsLog;
@@ -183,6 +216,13 @@ namespace XAU.ViewModels.Pages
                 _httpServer = new HttpServer(ServerPort, routes);
             }
             ListeningAddress = $"http://localhost:{ServerPort}";
+        }
+
+        // ClearAuthCache changes the Home settings while this page remains open. Refresh all
+        // fields before another toggle calls SaveSettings and could re-enable stale OAuth mode.
+        public void RefreshAfterAuthCacheCleared()
+        {
+            LoadSettings();
         }
 
         public void LoadSettings()

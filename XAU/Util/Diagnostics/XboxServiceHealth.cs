@@ -4,9 +4,9 @@ namespace XAU.Util.Diagnostics
 {
     /// <summary>
     /// How a single Xbox Live endpoint answered a liveness probe. This exists to answer ONE
-    /// question for the user: "is a 0h play-time / 'Unknown' profile MY problem or Microsoft's?".
-    /// Any HTTP answer (2xx-4xx) proves the service is awake -- so it is NOT an outage; only a
-    /// 5xx or "never got an HTTP response" points at an Xbox-side / network problem.
+    /// question for the user: "are the endpoints reachable at all?".
+    /// An HTTP answer proves only that this unauthenticated endpoint is reachable. A 5xx or
+    /// no response warrants investigation, but neither distinguishes Xbox from local network faults.
     /// </summary>
     public enum XblServiceVerdict
     {
@@ -67,9 +67,8 @@ namespace XAU.Util.Diagnostics
     public class XblServiceHealth
     {
         /// <summary>
-        /// Classify one probe. Any 2xx is Operational; any 4xx still proves the service is awake
-        /// (reported as "responding", NOT an outage). 5xx and "no response" are the only genuine
-        /// "Microsoft's side" signals.
+        /// Classify one probe. Any 2xx is Operational; a 4xx is an HTTP response but does not
+        /// validate an authenticated request. A 5xx or no response may be service or network failure.
         /// </summary>
         public static XblServiceVerdict Classify(bool reached, int statusCode)
         {
@@ -101,10 +100,8 @@ namespace XAU.Util.Diagnostics
         }
 
         /// <summary>
-        /// True when any probe points at a Microsoft-side fault, justifying an "Xbox outage"
-        /// warning. Deliberately conservative-toward-warning: one 5xx / unreachable among otherwise
-        /// healthy endpoints is treated as "a service is down" -- which is exactly the partial-outage
-        /// case (stats service lying about play-time while profile is fine) this feature exists to catch.
+        /// True when any probe reports a 5xx or no HTTP response. This suggests investigation,
+        /// not a definitive diagnosis: the local network or an intermediary may be at fault.
         /// </summary>
         public static bool LooksLikeServiceOutage(IEnumerable<XblServiceProbeResult> results)
         {
@@ -132,23 +129,23 @@ namespace XAU.Util.Diagnostics
             if (parts.Count == 0)
                 return "Xbox Status: no endpoints checked";
 
-            bool outage = LooksLikeServiceOutage(results);
-            return "Xbox Status: " + (outage ? "possible OUTAGE" : "healthy")
+            string status = OverallStatus(results);
+            return "Xbox Status: " + (status == "possible outage" ? "possible OUTAGE" : status)
                 + " (" + string.Join(", ", parts) + ")";
         }
 
         /// <summary>
-        /// User-facing one-word status. A 4xx from an UNAUTHENTICATED liveness ping is expected (these
-        /// services need an auth header we deliberately don't send), so it is NOT "rejected" -- it is
-        /// healthy, just like a 2xx. Only 5xx / unreachable read as problems.
+        /// User-facing status. A 4xx from an unauthenticated liveness ping is expected, but
+        /// "responding" does not assert that an authenticated operation would succeed.
         /// </summary>
         public static string UserStatus(XblServiceVerdict verdict)
         {
             switch (verdict)
             {
                 case XblServiceVerdict.Operational:
-                case XblServiceVerdict.RespondingClientError:
                     return "healthy";
+                case XblServiceVerdict.RespondingClientError:
+                    return "responding";
                 case XblServiceVerdict.RateLimited:
                     return "busy";
                 case XblServiceVerdict.ServerError:
@@ -177,11 +174,16 @@ namespace XAU.Util.Diagnostics
         {
             if (results == null)
                 return "not checked";
-            bool any = false;
-            foreach (var _ in results) { any = true; break; }
-            if (!any)
+            var probes = results.ToList();
+            if (probes.Count == 0)
                 return "not checked";
-            return LooksLikeServiceOutage(results) ? "possible outage" : "healthy";
+            if (LooksLikeServiceOutage(probes))
+                return "possible outage";
+            if (probes.Any(r => r.Verdict == XblServiceVerdict.RateLimited))
+                return "busy";
+            if (probes.Any(r => r.Verdict == XblServiceVerdict.RespondingClientError))
+                return "responding";
+            return "healthy";
         }
     }
 }

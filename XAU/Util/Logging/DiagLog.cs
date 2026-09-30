@@ -23,7 +23,7 @@ namespace XAU.Util.Logging
         private static readonly object _gate = new object();
         private const long MaxBytesBeforeRotate = 4L * 1024 * 1024; // roll at 4 MB
 
-        private static bool _enabled = true;     // default ON until LoadSettings applies the persisted value
+        private static bool _enabled = false;    // opt in only after LoadSettings applies the saved choice
         private static bool _dirReady = false;
         private static long _bytesWritten = -1;   // -1 == not yet seeded from an existing file
 
@@ -52,16 +52,15 @@ namespace XAU.Util.Logging
             return "[" + DateTime.Now.ToString("yyyy-MM-dd HH:mm:ss.fff") + "] " + message;
         }
 
-        /// <summary>Writes one diagnostic line to the console (always) and the log file (if enabled).</summary>
+        /// <summary>Writes diagnostics only when the user has opted in.</summary>
         public static void Write(string message)
         {
+            if (!_enabled)
+                return;
             string line = FormatLine(message);
 
             try { Debug.WriteLine(line); }
             catch { /* console mirror must never break logging */ }
-
-            if (!_enabled)
-                return; // suppressed: only the cheap console mirror above ran
 
             try
             {

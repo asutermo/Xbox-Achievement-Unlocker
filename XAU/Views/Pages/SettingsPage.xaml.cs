@@ -22,10 +22,12 @@ namespace XAU.Views.Pages
 
             _snackbarService = App.GetService<ISnackbarService>();
             _snackbarService.Show(
-                "Auth Cache Cleared",
-                "All tokens have been deleted. Log in again from the Home page.",
-                ControlAppearance.Success,
-                new SymbolIcon(SymbolRegular.Checkmark24));
+                cleared ? "Auth Cache Cleared" : "Auth Cache Not Fully Cleared",
+                cleared
+                    ? "All tokens have been deleted. Log in again from the Home page."
+                    : "Some cached authentication data could not be deleted or saved. Check file permissions and try again.",
+                cleared ? ControlAppearance.Success : ControlAppearance.Caution,
+                new SymbolIcon(cleared ? SymbolRegular.Checkmark24 : SymbolRegular.Warning24));
         }
     }
 }
