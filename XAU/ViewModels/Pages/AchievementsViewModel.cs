@@ -100,12 +100,12 @@ namespace XAU.ViewModels.Pages
                         if (HomeViewModel.SpoofedTitleID == TitleIDOverride)
                         {
                             GameInfo = "Manually Spoofing";
-                            GameName = GameInfoResponse.Titles[0].Name;
+                            GameName = GetFirstTitleName(GameInfoResponse) ?? GameName;
                         }
                         else
                         {
                             GameInfo = "Spoofing Another Game";
-                            GameName = GameInfoResponse.Titles[0].Name;
+                            GameName = GetFirstTitleName(GameInfoResponse) ?? GameName;
                         }
 
                     }
@@ -183,12 +183,12 @@ namespace XAU.ViewModels.Pages
                 if (HomeViewModel.SpoofedTitleID == TitleIDOverride)
                 {
                     GameInfo = "Manually Spoofing";
-                    GameName = GameInfoResponse.Titles[0].Name;
+                    GameName = GetFirstTitleName(GameInfoResponse) ?? GameName;
                 }
                 else
                 {
                     GameInfo = "Spoofing Another Game";
-                    GameName = GameInfoResponse.Titles[0].Name;
+                    GameName = GetFirstTitleName(GameInfoResponse) ?? GameName;
                 }
             }
             else
@@ -198,7 +198,7 @@ namespace XAU.ViewModels.Pages
                 GameInfo = "Auto Spoofing";
                 if (GameInfoResponse.Titles.Any())
                 {
-                    GameName = GameInfoResponse.Titles[0].Name;
+                    GameName = GetFirstTitleName(GameInfoResponse) ?? GameName;
                 }
 
                 await Task.Run(() => Spoofing());
@@ -207,12 +207,12 @@ namespace XAU.ViewModels.Pages
                     if (HomeViewModel.SpoofedTitleID == HomeViewModel.AutoSpoofedTitleID)
                     {
                         GameInfo = "Manually Spoofing";
-                        GameName = GameInfoResponse.Titles[0].Name;
+                        GameName = GetFirstTitleName(GameInfoResponse) ?? GameName;
                     }
                     else
                     {
                         GameInfo = "Spoofing Another Game";
-                        GameName = GameInfoResponse.Titles[0].Name;
+                        GameName = GetFirstTitleName(GameInfoResponse) ?? GameName;
                     }
                 }
                 HomeViewModel.AutoSpoofedTitleID = "0";

@@ -342,11 +342,20 @@ public class XboxRestAPI
         // count failures, trigger auth recovery, and stop pretending the spoof is alive.
         if (!response.IsSuccessStatusCode)
         {
-            // Response bodies can contain account/session data; the status is enough to
-            // classify a rejected heartbeat without writing the body to diagnostics.
+#if DEBUG
+            // Response bodies can contain account/session data; surface the reason only in
+            // DEBUG builds so a rejected heartbeat can be diagnosed from the console.
+            string debugBody = await response.Content.ReadAsStringAsync();
+            if (debugBody.Length > 500)
+                debugBody = debugBody.Substring(0, 500);
+            throw new HttpRequestException(
+                $"Heartbeat failed: {(int)response.StatusCode} {response.StatusCode}. {debugBody}",
+                null, response.StatusCode);
+#else
             throw new HttpRequestException(
                 $"Heartbeat failed: {(int)response.StatusCode} {response.StatusCode}",
                 null, response.StatusCode);
+#endif
         }
     }
 
