@@ -10,6 +10,7 @@ using Wpf.Ui.Controls;
 using Wpf.Ui.Common;
 using Wpf.Ui.Contracts;
 using Wpf.Ui.Services;
+using XAU.Util.Logging;
 using XAU.Views.Pages;
 
 namespace XAU.ViewModels.Pages
@@ -222,13 +223,37 @@ namespace XAU.ViewModels.Pages
 
         public async Task Spoofing()
         {
-            await _xboxRestAPI.Value.SendHeartbeatAsync(HomeViewModel.XUIDOnly, HomeViewModel.AutoSpoofedTitleID);
+            await TrySendHeartbeat();
             SpoofingUpdate = false;
             while (!SpoofingUpdate)
             {
                 await Task.Delay(TimeSpan.FromSeconds(300));
                 if (SpoofingUpdate) break;
+                await TrySendHeartbeat();
+            }
+        }
+
+        /// <summary>
+        /// Heartbeat failures are logged instead of thrown: the auto-spoof loop must not crash
+        /// on a transient 4xx/5xx. Presence death shows up as presence expiring on Xbox.
+        /// </summary>
+        private int _heartbeatFailureCount = 0;
+        private async Task TrySendHeartbeat()
+        {
+            try
+            {
                 await _xboxRestAPI.Value.SendHeartbeatAsync(HomeViewModel.XUIDOnly, HomeViewModel.AutoSpoofedTitleID);
+                _heartbeatFailureCount = 0;
+            }
+            catch (HttpRequestException ex)
+            {
+                _heartbeatFailureCount++;
+                DiagLog.Write($"[SPOOF] auto-spoof heartbeat failed ({_heartbeatFailureCount} consecutive): {(int?)ex.StatusCode ?? 0} {ex.Message}");
+            }
+            catch (Exception ex)
+            {
+                _heartbeatFailureCount++;
+                DiagLog.Write($"[SPOOF] auto-spoof heartbeat failed ({_heartbeatFailureCount} consecutive): {ex.GetType().Name}: {ex.Message}");
             }
         }
 

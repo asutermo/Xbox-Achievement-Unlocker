@@ -1,4 +1,5 @@
 using HtmlAgilityPack;
+using XAU.Util.Logging;
 using Microsoft.Data.Sqlite;
 using Newtonsoft.Json.Linq;
 using System.Data;
@@ -260,7 +261,7 @@ namespace XAU.ViewModels.Pages
             Stopwatch stopwatch = new Stopwatch();
             stopwatch.Start();
             SpoofingText = "Spoofing started...";
-            await _xboxRestAPI.Value.SendHeartbeatAsync(HomeViewModel.XUIDOnly, CurrentSpoofingID);
+            await TrySendHeartbeat();
             var lastHeartbeat = DateTime.UtcNow;
             SpoofingUpdate = false;
             while (!SpoofingUpdate)
@@ -275,12 +276,36 @@ namespace XAU.ViewModels.Pages
                     SpoofingText = $"Spoofing {GameInfoResponse.Titles[0].Name} For: {stopwatch.Elapsed.ToString(@"hh\:mm\:ss")}";
                 if ((DateTime.UtcNow - lastHeartbeat).TotalSeconds >= 300)
                 {
-                    await _xboxRestAPI.Value.SendHeartbeatAsync(HomeViewModel.XUIDOnly, CurrentSpoofingID);
+                    await TrySendHeartbeat();
                     lastHeartbeat = DateTime.UtcNow;
                 }
             }
         }
 
+
+        /// <summary>
+        /// Heartbeat failures are logged instead of thrown: the spoof loop must not crash on a
+        /// transient 4xx/5xx. Repeated-failure presence death is visible via the Xbox status page.
+        /// </summary>
+        private int _heartbeatFailureCount = 0;
+        private async Task TrySendHeartbeat()
+        {
+            try
+            {
+                await _xboxRestAPI.Value.SendHeartbeatAsync(HomeViewModel.XUIDOnly, CurrentSpoofingID);
+                _heartbeatFailureCount = 0;
+            }
+            catch (System.Net.Http.HttpRequestException ex)
+            {
+                _heartbeatFailureCount++;
+                DiagLog.Write($"[SPOOF] heartbeat failed ({_heartbeatFailureCount} consecutive): {(int?)ex.StatusCode ?? 0} {ex.Message}");
+            }
+            catch (Exception ex)
+            {
+                _heartbeatFailureCount++;
+                DiagLog.Write($"[SPOOF] heartbeat failed ({_heartbeatFailureCount} consecutive): {ex.GetType().Name}: {ex.Message}");
+            }
+        }
         #endregion
 
         #region GameSearch

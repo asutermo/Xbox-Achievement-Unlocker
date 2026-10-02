@@ -311,11 +311,20 @@ public class XboxRestAPI
 
     public async Task SendHeartbeatAsync(string xuid, string spoofedTitleId, CancellationToken cancellationToken = default)
     {
-        if (string.IsNullOrWhiteSpace(xuid) || string.IsNullOrWhiteSpace(spoofedTitleId) || !long.TryParse(spoofedTitleId, out var numericId))
+        if (string.IsNullOrWhiteSpace(xuid) || string.IsNullOrWhiteSpace(spoofedTitleId))
             return;
 
         var url = string.Format(InterpolatedXboxAPIUrls.HeartbeatUrl, xuid);
-        var body = JsonConvert.SerializeObject(new HeartbeatRequest { id = numericId });
+        var body = JsonConvert.SerializeObject(new HeartbeatRequest()
+        {
+            titles = new List<TitleRequest>()
+            {
+                new TitleRequest()
+                {
+                    id = spoofedTitleId
+                }
+            }
+        });
         var signature = XAU.Services.WamAuthService.SignRequest("POST", url, body);
 
         SetDefaultSpooferHeaders();

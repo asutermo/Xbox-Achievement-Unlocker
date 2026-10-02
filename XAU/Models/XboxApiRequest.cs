@@ -37,8 +37,15 @@ public class GameStatsRequest
 
 public class HeartbeatRequest
 {
-    public long id { get; set; }
-    public string State { get; set; } = "Active";
+    public List<TitleRequest> titles { get; set; } = new List<TitleRequest>();
+}
+
+public class TitleRequest
+{
+    public int expiration { get; set; } = 600;
+    public string? id { get; set; }
+    public string state { get; set; } = "active";
+    public string sandbox { get; set; } = "RETAIL";
 }
 
 public class GamepassProductsRequest

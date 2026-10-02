@@ -399,6 +399,43 @@ namespace XAU.ViewModels.Pages
             {
                 EventsLog($"WAM account load failed: {ex.Message}");
             }
+
+            await AutoLoginIfSingleAccountAsync();
+        }
+
+        /// <summary>
+        /// Silent auto-login at startup: with exactly one Microsoft account signed in to Windows
+        /// there is nothing to disambiguate, so log in without asking. With zero or multiple
+        /// accounts stay on the manual flow (the picker is shown on the Login button).
+        /// </summary>
+        private async Task AutoLoginIfSingleAccountAsync()
+        {
+            if (_wamAccounts.Count == 1)
+                await CompleteLoginAsync(_wamAccounts[0]);
+        }
+
+        private async Task CompleteLoginAsync(global::Windows.Security.Credentials.WebAccount selected)
+        {
+            LoginText = "Logging in...";
+            _currentWamAccount = selected;
+            var success = await XAU.Services.WamAuthService.LoginAsync(selected);
+
+            if (success)
+            {
+                XAUTH = XAU.Services.WamAuthService.GetXblToken()!;
+                XUIDOnly = XAU.Services.WamAuthService.Xuid!;
+                AchievementsViewModel.EventsToken = XAU.Services.WamAuthService.GetEventsToken();
+                InitComplete = true;
+                IsLoggedIn = true;
+                LoginText = "Logged In";
+                StartTokenRefreshTimer();
+                GrabProfile();
+            }
+            else
+            {
+                LoginText = "Login";
+                _snackbarService.Show("Login", "Authentication failed. Make sure the account is signed in to Windows.", ControlAppearance.Danger, new SymbolIcon(SymbolRegular.ErrorCircle24), _snackbarDuration);
+            }
         }
 
         [RelayCommand]
@@ -462,26 +499,7 @@ namespace XAU.ViewModels.Pages
                 selected = _wamAccounts[listBox.SelectedIndex];
             }
 
-            LoginText = "Logging in...";
-            _currentWamAccount = selected;
-            var success = await XAU.Services.WamAuthService.LoginAsync(selected);
-
-            if (success)
-            {
-                XAUTH = XAU.Services.WamAuthService.GetXblToken()!;
-                XUIDOnly = XAU.Services.WamAuthService.Xuid!;
-                AchievementsViewModel.EventsToken = XAU.Services.WamAuthService.GetEventsToken();
-                InitComplete = true;
-                IsLoggedIn = true;
-                LoginText = "Logged In";
-                StartTokenRefreshTimer();
-                GrabProfile();
-            }
-            else
-            {
-                LoginText = "Login";
-                _snackbarService.Show("Login", "Authentication failed. Make sure the account is signed in to Windows.", ControlAppearance.Danger, new SymbolIcon(SymbolRegular.ErrorCircle24), _snackbarDuration);
-            }
+            await CompleteLoginAsync(selected);
         }
 
         #endregion
