@@ -119,39 +119,5 @@ public class StabilityTests
         Assert.Equal(1, initsRun);
     }
 
-    [Theory]
-    [InlineData(false, true)]  // idle worker -> may start
-    [InlineData(true,  false)] // busy worker -> must NOT start (would throw)
-    public void ShouldStartWorker_Matrix(bool isBusy, bool expected)
-    {
-        Assert.Equal(expected, HomeViewModel.ShouldStartWorker(isBusy));
-    }
-
-    [Fact]
-    public void WorkerStarts_AreIdempotentUnderDoubleCompletion()
-    {
-        // The RunWorkerCompleted handler restarts the worker; combined with a manual start that
-        // previously produced a concurrent-start exception. With the ShouldStartWorker guard, a
-        // start while already busy is a no-op instead of a crash.
-        bool busy = false;
-        int realStarts = 0;
-
-        void Start()
-        {
-            if (!HomeViewModel.ShouldStartWorker(busy))
-                return;
-            busy = true;   // RunWorkerAsync flips IsBusy true
-            realStarts++;
-        }
-
-        Start();            // start
-        Start();            // already busy -> suppressed
-        busy = false;       // worker completed
-        Start();            // start again after completion
-        Start();            // already busy -> suppressed
-
-        Assert.Equal(2, realStarts);
-    }
-
     #endregion
 }

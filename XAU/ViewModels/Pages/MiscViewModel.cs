@@ -66,6 +66,98 @@ namespace XAU.ViewModels.Pages
         private GameTitle GameInfoResponse;
         private GameStatsResponse GameStatsResponse;
 
+        /// <summary>
+        /// Diagnostic dump of every stat bucket (name/type/value/properties) so a spurious
+        /// "Time Played: Unknown" can be explained from the log alone.
+        /// </summary>
+        public static string DumpStatBuckets(GameStatsResponse response)
+        {
+            if (response == null || response.StatListsCollection == null)
+                return "<no stat lists>";
+
+            var sb = new System.Text.StringBuilder();
+            for (int i = 0; i < response.StatListsCollection.Count; i++)
+            {
+                var list = response.StatListsCollection[i];
+                if (list == null || list.Stats == null)
+                    continue;
+                for (int j = 0; j < list.Stats.Count; j++)
+                {
+                    var s = list.Stats[j];
+                    sb.Append($"[{i}][{j}] name={s?.Name} type={s?.Type} value={(s?.Value == null ? "<null>" : "\"" + s.Value + "\"")}");
+                    sb.Append("; ");
+                }
+            }
+            return sb.Length == 0 ? "<empty>" : sb.ToString();
+        }
+
+        /// <summary>
+        /// Pulls the MinutesPlayed figure (in minutes) out of a userstats batch response by scanning
+        /// EVERY stat bucket for one whose Name is "MinutesPlayed", instead of trusting [0][0]. Returns
+        /// the LARGEST matching value (the all-time aggregate dominates any seasonal/device slice) or -1
+        /// when no MinutesPlayed stat exists at all (caller then shows "Unknown").
+        /// </summary>
+        public static double GetMinutesPlayed(GameStatsResponse response)
+        {
+            if (response == null || response.StatListsCollection == null)
+                return -1;
+
+            double best = -1;
+            foreach (var list in response.StatListsCollection)
+            {
+                if (list == null || list.Stats == null)
+                    continue;
+                foreach (var stat in list.Stats)
+                {
+                    if (stat == null)
+                        continue;
+                    // Only ever consider the MinutesPlayed statistic, so a Gamerscore/Score/etc. can
+                    // never be mistaken for play-time (which the old positional [0][0] read risked).
+                    if (!string.Equals(stat.Name?.Trim(), "MinutesPlayed", StringComparison.OrdinalIgnoreCase))
+                        continue;
+
+                    // The figure usually sits in Value; some responses surface it only via Properties /
+                    // GroupProperties, so fall back to a numeric found there before giving up.
+                    if ((TryParseMinutes(stat.Value, out double value)
+                            || TryParseAnyNumeric(stat.Properties, out value)
+                            || TryParseAnyNumeric(stat.GroupProperties, out value))
+                        && value > best)
+                    {
+                        best = value;
+                    }
+                }
+            }
+            return best;
+        }
+
+        private static bool TryParseMinutes(string candidate, out double value)
+        {
+            value = 0;
+            return !string.IsNullOrWhiteSpace(candidate)
+                && double.TryParse(candidate.Trim(),
+                    System.Globalization.NumberStyles.Float | System.Globalization.NumberStyles.AllowThousands,
+                    System.Globalization.CultureInfo.InvariantCulture, out value);
+        }
+
+        private static bool TryParseAnyNumeric(Dictionary<string, object> props, out double value)
+        {
+            value = 0;
+            if (props == null)
+                return false;
+            foreach (var kv in props)
+            {
+                if (kv.Value == null)
+                    continue;
+                if (double.TryParse(kv.Value.ToString()?.Trim(),
+                        System.Globalization.NumberStyles.Float | System.Globalization.NumberStyles.AllowThousands,
+                        System.Globalization.CultureInfo.InvariantCulture, out value))
+                {
+                    return true;
+                }
+            }
+            return false;
+        }
+
         [RelayCommand]
         public async Task SpooferButtonClicked()
         {
@@ -86,13 +178,7 @@ namespace XAU.ViewModels.Pages
                 GameImage = "pack://application:,,,/Assets/cirno.png";
                 GameTime = "Time Played: ";
                 HomeViewModel.SpoofingStatus = 0;
-                try
-                {
-                    await _xboxRestAPI.Value.StopHeartbeatAsync(HomeViewModel.XUIDOnly);
-                }
-                catch (Exception)
-                {
-                }
+                await _xboxRestAPI.Value.StopHeartbeatAsync(HomeViewModel.XUIDOnly);
                 return;
             }
             HomeViewModel.SpoofedTitleID = NewSpoofingID;
@@ -109,19 +195,8 @@ namespace XAU.ViewModels.Pages
         public async void SpoofGame()
         {
             CurrentSpoofingID = NewSpoofingID;
-            try
-            {
-                GameInfoResponse = await _xboxRestAPI.Value.GetGameTitleAsync(HomeViewModel.XUIDOnly, NewSpoofingID);
-                GameStatsResponse = await _xboxRestAPI.Value.GetGameStatsAsync(HomeViewModel.XUIDOnly, NewSpoofingID);
-            }
-            catch (Exception ex)
-            {
-                _snackbarService.Show("Error: Unable to acquire game info or stats",
-                    $"The request failed: {ex.Message}",
-                    ControlAppearance.Danger,
-                    new SymbolIcon(SymbolRegular.ErrorCircle24), _snackbarDuration);
-                return;
-            }
+            GameInfoResponse = await _xboxRestAPI.Value.GetGameTitleAsync(HomeViewModel.XUIDOnly, NewSpoofingID);
+            GameStatsResponse = await _xboxRestAPI.Value.GetGameStatsAsync(HomeViewModel.XUIDOnly, NewSpoofingID);
 
             if (GameInfoResponse == null || GameStatsResponse == null || !GameInfoResponse.Titles.Any())
             {
@@ -185,7 +260,7 @@ namespace XAU.ViewModels.Pages
             Stopwatch stopwatch = new Stopwatch();
             stopwatch.Start();
             SpoofingText = "Spoofing started...";
-            await TrySendHeartbeat();
+            await _xboxRestAPI.Value.SendHeartbeatAsync(HomeViewModel.XUIDOnly, CurrentSpoofingID);
             var lastHeartbeat = DateTime.UtcNow;
             SpoofingUpdate = false;
             while (!SpoofingUpdate)
@@ -197,23 +272,12 @@ namespace XAU.ViewModels.Pages
                     HomeViewModel.SpoofedTitleID = "0";
                     break;
                 }
-                    SpoofingText = $"Spoofing {GameInfoResponse?.Titles?.FirstOrDefault()?.Name ?? CurrentSpoofingID} For: {stopwatch.Elapsed.ToString(@"hh\:mm\:ss")}";
+                    SpoofingText = $"Spoofing {GameInfoResponse.Titles[0].Name} For: {stopwatch.Elapsed.ToString(@"hh\:mm\:ss")}";
                 if ((DateTime.UtcNow - lastHeartbeat).TotalSeconds >= 300)
                 {
-                    await TrySendHeartbeat();
+                    await _xboxRestAPI.Value.SendHeartbeatAsync(HomeViewModel.XUIDOnly, CurrentSpoofingID);
                     lastHeartbeat = DateTime.UtcNow;
                 }
-            }
-        }
-
-        private async Task TrySendHeartbeat()
-        {
-            try
-            {
-                await _xboxRestAPI.Value.SendHeartbeatAsync(HomeViewModel.XUIDOnly, CurrentSpoofingID);
-            }
-            catch (Exception)
-            {
             }
         }
 
@@ -360,16 +424,7 @@ namespace XAU.ViewModels.Pages
                 return;
             }
 
-            JObject profileData;
-            try
-            {
-                profileData = await _xboxRestAPI.Value.GetGamertagProfileAsync(Gamertag) ?? new JObject();
-            }
-            catch (Exception)
-            {
-                _snackbarService.Show("Error", "Failed to fetch gamertag information.", ControlAppearance.Danger, new SymbolIcon(SymbolRegular.ErrorCircle24), _snackbarDuration);
-                return;
-            }
+            var profileData = await _xboxRestAPI.Value.GetGamertagProfileAsync(Gamertag) ?? new JObject();
             var profileUsers = profileData["profileUsers"]?.FirstOrDefault();
             if (profileUsers == null)
             {

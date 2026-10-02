@@ -22,7 +22,7 @@ namespace XAU.ViewModels.Pages
 
     public partial class HomeViewModel : ObservableObject, INavigationAware
     {
-        public static string ToolVersion = "26.06.14";
+        public static string ToolVersion = "EmptyDevToolVersion";
         public static string EventsVersion = "1.0";
 
         //profile vars
@@ -58,9 +58,6 @@ namespace XAU.ViewModels.Pages
         //SnackBar
         public HomeViewModel(ISnackbarService snackbarService, IContentDialogService contentDialogService)
         {
-            // Singleton in DI (App.xaml.cs) -- publish the one instance so background consumers
-            // (heartbeat loops, HTTP-server routes) can reach instance methods like auth recovery.
-            Instance = this;
             _snackbarService = snackbarService;
             _contentDialogService = contentDialogService;
 
@@ -99,26 +96,12 @@ namespace XAU.ViewModels.Pages
         public static string XAUTH = "";
         public static string XUIDOnly = "";
         public static bool InitComplete = false;
-
-        // The single DI-registered HomeViewModel instance (see ctor). Static state like XAUTH lives
-        // on this class; instance entry points (TryRecoverAuthAsync) are reached through this.
-        public static HomeViewModel? Instance;
-
-        // Cadence/anti-thrash state for the memory-scan token grabber. While we already hold a
-        // (possibly expired) token we don't re-scan the whole user address space on every ~1s poll
-        // tick -- only often enough to notice the Xbox app refreshing to a NEW token. See
-        // ShouldScanForXauth / ShouldAdoptScannedToken.
-        // How often the logged-in probe re-validates a HELD token. Without this an OAuth/SISU XBL3.0
-        // token that expires hours into a session is never detected: TestXAUTH used to run only while
-        // signed OUT, so the first sign of expiry was every other API call 401-ing at once.
-        private static readonly TimeSpan LoggedInProbeInterval = TimeSpan.FromMinutes(15);
-
-        private static readonly TimeSpan XauthScanInterval = TimeSpan.FromSeconds(5);
-        private static DateTime _lastXauthScanUtc = DateTime.MinValue;
-        private bool _xauthScanInFlight = false;
-
         private bool _isInitialized = false;
         private bool _isInitializing = false;
+
+        /// <summary>Guards OnNavigatedTo so overlapping navigation ticks cannot stack two initializations.</summary>
+        public static bool ShouldBeginInitialization(bool initialized, bool initializing)
+            => !initialized && !initializing;
         string SettingsFilePath = Path.Combine(Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.MyDocuments), "XAU"), "settings.json");
         string EventsMetaFilePath = Path.Combine(Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.MyDocuments), "XAU"), "Events", "meta.json");
 
@@ -127,53 +110,10 @@ namespace XAU.ViewModels.Pages
 
         public async void OnNavigatedTo()
         {
-            // InitializeViewModel awaits network calls (update checks) before it flips
-            // _isInitialized, so a quick navigate-away-and-back could re-enter it and call
-            // XauthWorker.RunWorkerAsync() a second time -> "BackgroundWorker is currently
-            // busy". Gate on an in-progress flag as well, not just the completed flag.
-            if (!ShouldBeginInitialization(_isInitialized, _isInitializing))
-                return;
-
-            _isInitializing = true;
-            try
-            {
+            if (!_isInitialized)
                 await InitializeViewModel();
-            }
-            finally
-            {
-                _isInitializing = false;
-            }
         }
         public void OnNavigatedFrom() { }
-
-        /// <summary>
-        /// True only when InitializeViewModel should run: it has neither completed nor is
-        /// already in progress. Prevents re-entrant navigation from double-running init
-        /// (which used to double-start the BackgroundWorkers and crash).
-        /// </summary>
-        public static bool ShouldBeginInitialization(bool initialized, bool initializing)
-            => !initialized && !initializing;
-
-        /// <summary>
-        /// True when a BackgroundWorker may be (re)started. Starting an already-busy worker
-        /// throws InvalidOperationException; this guard (plus the catch in StartWorker) keeps
-        /// the "currently busy" crash from reaching the unhandled-exception dialog.
-        /// </summary>
-        public static bool ShouldStartWorker(bool isBusy) => !isBusy;
-
-        private void StartWorker(BackgroundWorker worker)
-        {
-            if (!ShouldStartWorker(worker.IsBusy))
-                return;
-            try
-            {
-                worker.RunWorkerAsync();
-            }
-            catch (InvalidOperationException)
-            {
-                // Worker was started on another thread between the IsBusy check and the call.
-            }
-        }
 
         #region Update
         private async void CheckForToolUpdates()
@@ -264,29 +204,21 @@ namespace XAU.ViewModels.Pages
         }
         private async void CheckForEventUpdates()
         {
-            try
+            if (EventsVersion == "EmptyDevEventsVersion")
+                return;
+            var response = await _gitHubRestAPI.Value.CheckForEventUpdatesAsync();
+            var EventsTimestamp = 0;
+            if (File.Exists(EventsMetaFilePath))
             {
-                if (EventsVersion == "EmptyDevEventsVersion")
-                    return;
-                var response = await _gitHubRestAPI.Value.CheckForEventUpdatesAsync();
-                var EventsTimestamp = 0;
-                if (File.Exists(EventsMetaFilePath))
-                {
-                    var metaJson = File.ReadAllText(EventsMetaFilePath);
-                    var meta = JsonConvert.DeserializeObject<EventsUpdateResponse>(metaJson);
-                    EventsTimestamp = meta.Timestamp;
-                }
-
-                if (response.Timestamp > EventsTimestamp && response.DataVersion == EventsVersion)
-                {
-                    _snackbarService.Show("Downloading Events Update...", "Please wait", ControlAppearance.Info, new SymbolIcon(SymbolRegular.Checkmark24), _snackbarDuration);
-                    UpdateEvents();
-                }
+                var metaJson = File.ReadAllText(EventsMetaFilePath);
+                var meta = JsonConvert.DeserializeObject<EventsUpdateResponse>(metaJson);
+                EventsTimestamp = meta.Timestamp;
             }
-            catch (Exception ex)
+
+            if (response.Timestamp > EventsTimestamp && response.DataVersion == EventsVersion)
             {
-                _snackbarService.Show("Events Update Check Failed", $"Could not check for event updates: {ex.Message}",
-                    ControlAppearance.Caution, new SymbolIcon(SymbolRegular.Warning24), _snackbarDuration);
+                _snackbarService.Show("Downloading Events Update...", "Please wait", ControlAppearance.Info, new SymbolIcon(SymbolRegular.Checkmark24), _snackbarDuration);
+                UpdateEvents();
             }
         }
 
@@ -416,6 +348,8 @@ namespace XAU.ViewModels.Pages
 
         private async Task InitializeViewModel()
         {
+            CheckForToolUpdates();
+            await LoadWamAccounts();
             if (!File.Exists(SettingsFilePath))
             {
                 if (!Directory.Exists(Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.MyDocuments),
@@ -464,9 +398,6 @@ namespace XAU.ViewModels.Pages
             catch (Exception ex)
             {
                 EventsLog($"WAM account load failed: {ex.Message}");
-            }
-            catch (Exception)
-            {
             }
         }
 
@@ -569,55 +500,20 @@ namespace XAU.ViewModels.Pages
             catch { }
         }
 
-        /// <summary>
-        /// Clears all cached authentication state (WAM session tokens, XAUTH, events token).
-        /// The user will need to log in again after calling this.
-        /// </summary>
-        public bool ClearAuthCache()
-        {
-            // Invalidate XAUTH so the next scan/login re-acquires it
-            XAUTH = "";
-            InitComplete = false;
-
-            // Clear events token from memory
-            AchievementsViewModel.EventsToken = null;
-
-            // Reset login state and profile display
-            IsLoggedIn = false;
-            StopTokenRefreshTimer();
-            LoginText = "Login";
-
-            // Rebuild the Xbox REST API so no stale token is attached
-            _xboxRestAPI = new Lazy<XboxRestAPI>(() => new XboxRestAPI(XAUTH));
-        }
         #region Profile
-        /// <summary>
-        /// Decides whether a profile fetch is allowed to start. Prevents the ~1s XauthWorker
-        /// progress ticks (and the login/refresh paths) from re-invoking the async-void
-        /// GrabProfile while an earlier fetch is still awaiting its network calls — which used
-        /// to stack a burst of "Profile information grabbed" snackbars.
-        /// - Automatic callers (worker ticks / login): require a logged-in user that has not
-        ///   already been grabbed, and require no fetch currently running.
-        /// - Manual caller (Refresh Profile button, force=true): allow a re-grab even when
-        ///   already grabbed, but still do not stack while a fetch is in-flight.
-        /// </summary>
-        public static bool ShouldStartProfileGrab(bool isLoggedIn, bool alreadyGrabbed, bool inFlight, bool force = false)
+        // Prevents stacked profile fetches: a second call while one is still awaiting its
+        // network round-trip would burst duplicate "Profile information grabbed" snackbars.
+        private bool _grabProfileInFlight = false;
+
+        public static bool ShouldStartProfileGrab(bool inFlight, bool force = false)
         {
-            if (inFlight)
-                return false;
-            if (!isLoggedIn)
-                return false;
-            return force || !alreadyGrabbed;
+            return force || !inFlight;
         }
 
         private async void GrabProfile(bool force = false)
         {
-            // The guard runs synchronously before the first await, so the ~1s progress ticks
-            // delivered on the dispatcher can never slip a second concurrent fetch in while the
-            // first is still pending. The in-flight flag is cleared in the finally block below.
-            if (!ShouldStartProfileGrab(IsLoggedIn, GrabbedProfile, _grabProfileInFlight, force))
+            if (!ShouldStartProfileGrab(_grabProfileInFlight, force))
                 return;
-
             _grabProfileInFlight = true;
             try
             {
@@ -781,24 +677,8 @@ namespace XAU.ViewModels.Pages
 
         private void LoadSettings()
         {
-            // A corrupt/truncated settings.json (or a lock from a parallel write) used to crash
-            // startup right here. Degrade to defaults instead; the user can still save over it.
-            string? settingsJson;
-            XAUSettings? settings;
-            try
-            {
-                settingsJson = File.ReadAllText(SettingsFilePath);
-                settings = JsonConvert.DeserializeObject<XAUSettings>(settingsJson);
-            }
-            catch (Exception ex)
-            {
-                DiagLog.Write($"[SETTINGS] failed to read/deserialise {SettingsFilePath}: {ex.GetType().Name}: {ex.Message} -- continuing with in-memory defaults.");
-                _snackbarService.Show(
-                    "Settings load failed",
-                    "settings.json could not be read; defaults are in use. Saving settings will overwrite the bad file.",
-                    ControlAppearance.Caution, new SymbolIcon(SymbolRegular.Warning24), _snackbarDuration);
-                return;
-            }
+            var settingsJson = File.ReadAllText(SettingsFilePath);
+            var settings = JsonConvert.DeserializeObject<XAUSettings>(settingsJson);
             if (settings == null)
             {
                 _snackbarService.Show(
