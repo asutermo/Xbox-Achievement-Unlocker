@@ -369,13 +369,23 @@ public class XboxRestAPI
 
         SetDefaultSpooferHeaders();
         _spooferClient.DefaultRequestHeaders.Add(HeaderNames.ContractVersion, HeaderValues.ContractVersion3);
-if (signature != null)
+        if (signature != null)
             _spooferClient.DefaultRequestHeaders.Add("Signature", signature);
 
         var response = await _spooferClient.DeleteAsync(url);
+        // Best-effort removal: upstream Main fire-and-forgets the DELETE and never inspects the
+        // status. The presence endpoint commonly answers 400 here (the POST heartbeat expires on
+        // its own after 600s), so surface it in the log instead of crashing the stop path.
         if (!response.IsSuccessStatusCode)
         {
-            throw new HttpRequestException($"Heartbeat removal failed: {(int)response.StatusCode} {response.StatusCode}", null, response.StatusCode);
+#if DEBUG
+            string debugBody = await response.Content.ReadAsStringAsync();
+            if (debugBody.Length > 500)
+                debugBody = debugBody.Substring(0, 500);
+            DiagLog.Write($"[SPOOF] heartbeat removal: {(int)response.StatusCode} {response.StatusCode}. {debugBody}");
+#else
+            DiagLog.Write($"[SPOOF] heartbeat removal: {(int)response.StatusCode} {response.StatusCode}");
+#endif
         }
     }
 
