@@ -21,6 +21,74 @@ namespace XAU.Tests;
 /// </summary>
 public class XauthScanTests
 {
+    [Theory]
+    [InlineData(true)]
+    [InlineData(false)]
+    public void IsPlausibleXblToken_ClassifiesScanCandidates(bool makeValid)
+    {
+        // A real observed token is ~2.5KB; the body charset is base64url-ish with '.' separators.
+        string body = new string('A', 2400) + ". BBBB=".Replace(" ", "");
+        string candidate = makeValid
+            ? "XBL3.0 x=2533274805248103;" + body
+            : "XBL3.0 x=2533274805248103;short body";
+        Assert.Equal(makeValid, HomeViewModel.IsPlausibleXblToken(candidate));
+    }
+
+    [Fact]
+    public void RejectedHeldToken_RotatesToNextCandidate_BelowBar()
+    {
+        // 17:41 log: valid=3 plausible candidates, freq 1 each, nothing logged in.
+        // Frequency can't pick a winner; the profile API is the referee, so rotate.
+        const string held = "XBL3.0 x=111;" + Pad;
+        const string next = "XBL3.0 x=222;" + Pad;
+        Assert.True(HomeViewModel.ShouldAdoptScannedToken(
+            next, held, frequency: 1, distinctNonEmptyCandidates: 3, heldTokenRejected: true));
+    }
+
+    [Fact]
+    public void LoggedInState_KeepsConfidenceBar_EvenWithCompetingCandidates()
+    {
+        const string held = "XBL3.0 x=111;" + Pad;
+        const string next = "XBL3.0 x=222;" + Pad;
+        // Once logged in, a below-bar candidate must not thrash the session.
+        Assert.False(HomeViewModel.ShouldAdoptScannedToken(
+            next, held, frequency: 1, distinctNonEmptyCandidates: 3, heldTokenRejected: false));
+    }
+
+    private const string Pad = "tokenbodyplaceholder-that-is-long-enough-for-plausibility-000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000";
+
+    [Fact]
+    public void RejectedHeldToken_RotatesToNextCandidate_BelowBar_CapsCompetitorCount()
+    {
+        // Rotation is bounded: a scan full of dozens of distinct candidates is not a
+        // rotate-through-them-all situation.
+        const string held = "XBL3.0 x=111;" + Pad;
+        const string next = "XBL3.0 x=222;" + Pad;
+        Assert.False(HomeViewModel.ShouldAdoptScannedToken(
+            next, held, frequency: 1, distinctNonEmptyCandidates: 12, heldTokenRejected: true));
+    }
+
+    [Fact]
+    public void LoneStructurallyValidCandidate_BelowBar_IsAdoptedWhenNothingHeld()
+    {
+        // The 5:36 PM scan: 11 distinct garbage reads (freq 1 each) around one real token.
+        // After structural filtering, the real token is the lone valid candidate and must win.
+        var frequency = new Dictionary<string, int>
+        {
+            [GarbagePrefixedToken] = 1,
+            ["XBL3.0 x=99;junk " + new string('q', 16000)] = 1,
+            ["XBL3.0 x=1234567890;" + new string('t', 2400)] = 1,
+        };
+
+        var filtered = HomeViewModel.FilterPlausibleTokens(frequency);
+        var best = HomeViewModel.SelectBestScannedToken(filtered, out int bestFreq);
+
+        Assert.Equal("XBL3.0 x=1234567890;" + new string('t', 2400), best);
+        Assert.True(HomeViewModel.ShouldAdoptScannedToken(
+            best, string.Empty, bestFreq, HomeViewModel.CountDistinctNonEmptyTokens(filtered)));
+    }
+
+    private static readonly string GarbagePrefixedToken = "XBL3.0 x=55;" + new string('g', 16383);
     private static readonly TimeSpan Interval = TimeSpan.FromSeconds(5);
 
     #region Scan throttling
@@ -84,6 +152,32 @@ public class XauthScanTests
     {
         Assert.True(HomeViewModel.ShouldAdoptScannedToken(
             "XBL3.0 x=123;tok", string.Empty, frequency: 5));
+    }
+
+    [Fact]
+    public void ShouldAdoptScannedToken_LoneCandidateBelowBar_AcceptedWhenNothingHeld()
+    {
+        // Regression: the Xbox app can expose only 3 copies of the token (log 2026-09-30 17:11,
+        // bestFreq=3, need >3). With nothing held, a unique non-empty candidate must still be
+        // adopted or login never happens.
+        Assert.True(HomeViewModel.ShouldAdoptScannedToken(
+            "XBL3.0 x=123;sometoken", "", frequency: 3, distinctNonEmptyCandidates: 1));
+        Assert.True(HomeViewModel.ShouldAdoptScannedToken(
+            "XBL3.0 x=123;sometoken", "", frequency: 1, distinctNonEmptyCandidates: 1));
+    }
+
+    [Theory]
+    [InlineData("XBL3.0 x=1;a", "XBL3.0 x=2;b")]
+    [InlineData("", "")]
+    public void ShouldAdoptScannedToken_CompetingOrEmptyCandidates_KeepConfidenceBar(
+        string held, string other)
+    {
+        // When several distinct tokens compete (or the scan found nothing), a below-bar
+        // candidate stays rejected -- a truncated/garbage read must not win.
+        Assert.False(HomeViewModel.ShouldAdoptScannedToken(
+            held, "", frequency: 3, distinctNonEmptyCandidates: 2));
+        Assert.False(HomeViewModel.ShouldAdoptScannedToken(
+            other, "", frequency: 3, distinctNonEmptyCandidates: 0));
     }
 
     [Theory]

@@ -51,4 +51,11 @@
     <Folder Include="Util\XboxAuthNet\Platforms\" />
   </ItemGroup>
 
+  <ItemGroup>
+    <!-- Nested vendored project's build output must not be compiled by this
+         project's glob (the .NET 10 SDK's default obj/bin exclusions no
+         longer filter nested project obj dirs). -->
+    <Compile Remove="Util\XboxAuthNet\obj\**;Util\XboxAuthNet\bin\**" />
+  </ItemGroup>
+
 </Project>

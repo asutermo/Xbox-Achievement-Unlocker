@@ -638,12 +638,24 @@ namespace XAU.ViewModels.Pages
         /// expired token would be re-tested once per poll tick forever. Ignoring unchanged tokens
         /// lets that dead token settle until the Xbox app produces a genuinely new one.
         /// </summary>
-        public static bool ShouldAdoptScannedToken(string scanned, string current, int frequency)
+        public static bool ShouldAdoptScannedToken(string scanned, string current, int frequency,
+            int distinctNonEmptyCandidates = -1, bool heldTokenRejected = false)
         {
-            if (frequency <= 3)
-                return false;
             if (string.IsNullOrEmpty(scanned))
                 return false;
+            // Standard confidence bar. Exceptions, only while the session is unproven:
+            // 1. Nothing held + a lone candidate: the Xbox app sometimes exposes just 1-3 copies
+            //    (log 2026-09-30 17:11: bestFreq=3, need >3) and the old rule blocked login forever.
+            // 2. Held token was rejected (401) while signed out + few distinct candidates: several
+            //    plausible tokens/truncations compete at freq 1 (log 2026-09-30 17:41: valid=3,
+            //    bestFreq=1). Frequency cannot pick a winner; the profile API referees, so rotate.
+            if (frequency <= 3)
+            {
+                bool rotate = heldTokenRejected && distinctNonEmptyCandidates is >= 2 and <= 8;
+                bool lone = current.Length == 0 && distinctNonEmptyCandidates == 1;
+                if (!rotate && !lone)
+                    return false;
+            }
             return scanned != current;
         }
 
@@ -674,6 +686,44 @@ namespace XAU.ViewModels.Pages
                 }
             }
             return best;
+        }
+
+        /// <summary>Number of DISTINCT non-empty token strings in the scan, for the lone-candidate rule.</summary>
+        public static int CountDistinctNonEmptyTokens(IEnumerable<KeyValuePair<string, int>> frequency)
+        {
+            if (frequency == null)
+                return 0;
+            int distinct = 0;
+            foreach (var pair in frequency)
+                if (!string.IsNullOrWhiteSpace(pair.Key))
+                    distinct++;
+            return distinct;
+        }
+
+        /// <summary>
+        /// Structural check for a scanned XBL3.0 token. The AoB pattern only proves the prefix is
+        /// present; a long read from an unterminated buffer returns the prefix followed by
+        /// arbitrary memory, which frequency counting treats as a distinct garbage candidate
+        /// (log 2026-09-30 17:36: distinct=11, bestFreq=1, bestLen=16384). A real token is
+        /// "XBL3.0 x={digits};{token body}" with no whitespace, in a plausible size range.
+        /// </summary>
+        private static readonly System.Text.RegularExpressions.Regex XblTokenShape =
+            new(@"^XBL3\.0 x=\d{6,20};[A-Za-z0-9+/_=\-\.]{200,8000}$",
+                System.Text.RegularExpressions.RegexOptions.Compiled);
+
+        public static bool IsPlausibleXblToken(string? candidate) =>
+            !string.IsNullOrWhiteSpace(candidate) && XblTokenShape.IsMatch(candidate);
+
+        /// <summary>Keeps only candidates that parse as XBL3.0 tokens, dropping prefixed garbage.</summary>
+        public static Dictionary<string, int> FilterPlausibleTokens(IEnumerable<KeyValuePair<string, int>> frequency)
+        {
+            var filtered = new Dictionary<string, int>();
+            if (frequency == null)
+                return filtered;
+            foreach (var pair in frequency)
+                if (IsPlausibleXblToken(pair.Key))
+                    filtered[pair.Key] = pair.Value;
+            return filtered;
         }
 
         /// <summary>
@@ -750,17 +800,33 @@ namespace XAU.ViewModels.Pages
                         topFreqAll = pair.Value;
                 }
 
-                // Adopt the most-frequent NON-empty candidate. The old code took the single top-1 key, so an
-                // empty string (ReadString returns "" for an unreadable/<0x10000 address) could outrank the
-                // real token and silently block adoption -- the exact "topFreq=7, adoptedNew=False, can't log
-                // in" failure. Ignoring empties fixes that without touching the frequency>3 confidence bar.
-                string best = SelectBestScannedToken(frequency, out int bestFreq);
+                // Selection runs over STRUCTURALLY VALID candidates only: the AoB pattern matches
+                // the prefix inside larger unterminated buffers, so raw reads are often prefix +
+                // memory garbage (log 2026-09-30 17:36: distinct=11, bestFreq=1, bestLen=16384).
+                // Empties and garbage never outrank a genuine token this way.
+                Dictionary<string, int> validFrequency = FilterPlausibleTokens(frequency);
+
+                // Adopt the most-frequent valid candidate; a lone valid candidate is accepted
+                // below the confidence bar only when we hold nothing (ShouldAdoptScannedToken).
+                // Rotation while SIGNED OUT (not just after a rejection): at fresh startup several
+                // plausible candidates compete at freq 1 (log 2026-09-30 18:03: valid=4, bestFreq=1,
+                // currentXAUThLen=0) and nothing is ever adopted to reject — the gate must be open
+                // from the first scan. The profile API referees; once logged in the bar resumes.
+                bool rotating = !IsLoggedIn;
+                Dictionary<string, int> selectableFrequency = rotating && XAUTH.Length > 0
+                    ? validFrequency.Where(kvp => kvp.Key != XAUTH)
+                        .ToDictionary(kvp => kvp.Key, kvp => kvp.Value)
+                    : validFrequency;
+
+                string best = SelectBestScannedToken(selectableFrequency, out int bestFreq);
+                int distinctNonEmpty = CountDistinctNonEmptyTokens(validFrequency);
                 bool adoptedNew;
                 lock (_authStateLock)
                 {
                     if (!IsCurrentAuthGeneration(generation))
                         return;
-                    adoptedNew = ShouldAdoptScannedToken(best, XAUTH, bestFreq);
+                    adoptedNew = ShouldAdoptScannedToken(best, XAUTH, bestFreq, distinctNonEmpty,
+                        heldTokenRejected: rotating);
                     if (adoptedNew)
                     {
                         XAUTH = best;
@@ -770,9 +836,12 @@ namespace XAU.ViewModels.Pages
 
                 DiagLog.Write(
                     $"[XAUTHDBG] scan: candidates={XauthStrings.Length}, distinct={frequency.Count}, " +
-                    $"topFreq={topFreqAll} (need >3), bestFreq={bestFreq}, bestLen={best.Length}, " +
+                    $"valid={validFrequency.Count}, topFreq={topFreqAll} (need >3, lone-valid bypasses), " +
+                    $"bestFreq={bestFreq}, bestLen={best.Length}, " +
                     $"currentXAUThLen={XAUTH.Length}, adoptedNew={adoptedNew} [scan={scanMs}ms read={readMs}ms]" +
-                    (best.Length == 0 ? " (no readable token in memory -- Xbox app signed out?)" : ""));
+                    (best.Length == 0
+                        ? " (no structurally valid token in memory -- Xbox app signed out or token not fully written yet?)"
+                        : ""));
             }
             catch (Exception ex)
             {
